@@ -30,17 +30,17 @@ Click it for the panel: each account's usage and reset times, **Sign in**, **Use
 
 ## Requirements
 
-- macOS, where Claude Code keeps sign-ins in the keychain.
+- macOS, where Claude Code keeps sign-ins in the keychain, or Linux, where it keeps them in files.
 - Claude Code 2.1.296 or later, in its fullscreen renderer (`/tui fullscreen`), the only one that passes clicks on: the panel opens with a click.
-- Any Mac terminal: Terminal.app, iTerm2, Ghostty, Warp, VS Code. In iTerm2 the profile's *Enable mouse reporting* must be on, in tmux `set -g mouse on`, and iTerm2's `tmux -CC` mode can't run fullscreen.
+- Any Mac terminal: Terminal.app, iTerm2, Ghostty, Warp, VS Code; on Linux, one with mouse reporting. In iTerm2 the profile's *Enable mouse reporting* must be on, in tmux `set -g mouse on`, and iTerm2's `tmux -CC` mode can't run fullscreen.
 - Claude subscription accounts (tested with Max and Team seats).
 
 Mods are early access in Claude Code, and this one relies on internals a release can change: where sign-ins are stored, and the usage endpoint behind `/usage`.
 
 ## How it works
 
-- Each account you add gets a folder, `~/.claude/accounts/<n>`, and Claude Code keeps its sign-in in the keychain under that folder's name, as for any config folder. A switch points the session at another account's sign-in.
-- Its only network traffic: each account's usage every 10 minutes, from the endpoint `/usage` reads, with that account's own token. Tokens stay in the keychain; the mod stores each account's email, organization, plan and last usage.
+- Each account you add gets a folder, `~/.claude/accounts/<n>`, and Claude Code keeps its sign-in in the keychain under that folder's name (on Linux, in that folder's `.credentials.json`), as for any config folder. A switch points the session at another account's sign-in.
+- Its only network traffic: each account's usage every 10 minutes, from the endpoint `/usage` reads, with that account's own token. Tokens stay where Claude Code keeps them; the mod stores each account's email, organization, plan and last usage.
 
 ## Uninstall
 

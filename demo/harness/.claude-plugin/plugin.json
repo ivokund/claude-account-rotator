@@ -1,7 +1,7 @@
 {
   "name": "account-rotator-demo",
   "version": "0.1.0",
-  "description": "Recording harness: answers the account-rotator mod's keychain, usage, sign-in and store calls with imitated logins.",
+  "description": "Recording harness: answers the account-rotator mod's keychain or credentials file, usage, sign-in and store calls with imitated logins.",
   "author": {
     "name": "Ivo Kund"
   }

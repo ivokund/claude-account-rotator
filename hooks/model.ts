@@ -126,7 +126,7 @@ export function sameUsage(a: Reading | undefined, b: Reading | undefined, now: n
   )
 }
 
-/** The part of a stored login Claude Code keeps in the keychain that matters here. */
+/** The part of a stored login Claude Code keeps in the keychain (on Linux, a file) that matters here. */
 export type Credential = { accessToken: string; expiresAt: number; refreshTokenExpiresAt?: number }
 
 export function credentialFrom(text: string): Credential | undefined {
@@ -137,6 +137,11 @@ export function credentialFrom(text: string): Credential | undefined {
     // An entry that is not JSON is no usable login: the caller asks for a sign-in.
     return undefined
   }
+  return credentialIn(parsed)
+}
+
+/** The login a parsed entry holds: none without a usable `claudeAiOauth`. */
+export function credentialIn(parsed: unknown): Credential | undefined {
   const oauth = (parsed as { claudeAiOauth?: unknown } | null)?.claudeAiOauth
   if (typeof oauth !== 'object' || oauth === null) return undefined
   const { accessToken, expiresAt, refreshTokenExpiresAt } = oauth as Record<string, unknown>
@@ -256,6 +261,19 @@ export async function keychainItem(slot: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(slot.normalize('NFC')))
   const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
   return `Claude Code-credentials-${hex.slice(0, 8)}`
+}
+
+/**
+ * The file Claude Code keeps a slot's login in where there is no keychain
+ * (Linux): where 2.1.296 puts it for a `claude` child run with `slotEnv`, the
+ * normal login's in ~/.claude and any other slot's in its own directory,
+ * NFC-normalized. Undefined for the normal login with no home. A session
+ * started with CLAUDE_CONFIG_DIR set keeps its normal login in that directory
+ * instead, which this misses as `keychainItem` does on macOS.
+ */
+export function credentialsFile(slot: string, home: string | undefined): string | undefined {
+  const dir = slot === '' ? home && `${home}/.claude` : slot
+  return dir ? `${dir.normalize('NFC')}/.credentials.json` : undefined
 }
 
 /** The environment that points a `claude` child at a slot's login. */

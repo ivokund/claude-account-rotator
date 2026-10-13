@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, credentialFrom, footerStyleFrom, healthOf, keychainItem, pickTarget, pie, readingFromUsage, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, credentialFrom, credentialsFile, footerStyleFrom, healthOf, keychainItem, pickTarget, pie, readingFromUsage, shouldLeave, roomColor, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -81,6 +81,15 @@ test('names keychain entries as Claude Code does', async () => {
 })
 
 const EXPECTED_SLOT2_HASH = 'a296c876'
+
+test('names credentials files as Claude Code does where there is no keychain', () => {
+  expect(credentialsFile('', '/home/tester')).toBe('/home/tester/.claude/.credentials.json')
+  expect(credentialsFile('', undefined)).toBeUndefined()
+  expect(credentialsFile('', '')).toBeUndefined()
+  expect(credentialsFile('/home/tester/.claude/accounts/2', undefined)).toBe('/home/tester/.claude/accounts/2/.credentials.json')
+  // Claude Code keeps it in the directory's NFC spelling, which Linux tells apart from others.
+  expect(credentialsFile('/home/rene\u0301/.claude/accounts/2', undefined)).toBe('/home/ren\u00e9/.claude/accounts/2/.credentials.json')
+})
 
 test('room left is colored green with all of it, through yellow, to red with none', () => {
   expect(roomColor(100)).toBe('#36e236')

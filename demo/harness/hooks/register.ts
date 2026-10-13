@@ -115,15 +115,24 @@ async function keychainItem(slot: string): Promise<string> {
   return `Claude Code-credentials-${hex.slice(0, 8)}`
 }
 
-async function stored($: EngineInterface, item: string): Promise<ProcessRunResult> {
+/** A login's sign-in as Claude Code stores it, its token the one the usage answer knows. */
+async function signInOf($: EngineInterface, l: Login): Promise<string> {
   const now = fakeNow(await $.clock.now())
+  const oauth = { accessToken: `demo-${l.id}`, expiresAt: now + 6 * HOUR, refreshTokenExpiresAt: now + 25 * DAY, subscriptionType: l.plan }
+  return JSON.stringify({ claudeAiOauth: oauth })
+}
+
+async function stored($: EngineInterface, item: string): Promise<ProcessRunResult> {
   for (const l of logins) {
     if (!l.isSignedIn || (await keychainItem(slotOf(l.id))) !== item) continue
-    const oauth = { accessToken: `demo-${l.id}`, expiresAt: now + 6 * HOUR, refreshTokenExpiresAt: now + 25 * DAY, subscriptionType: l.plan }
-    return ran(0, JSON.stringify({ claudeAiOauth: oauth }))
+    return ran(0, await signInOf($, l))
   }
   return ran(44, '')
 }
+
+/** Where there is no keychain (Linux): the signed-in login whose credentials file is `path`. */
+const fileLogin = (path: string) =>
+  logins.find(l => l.isSignedIn && `${slotOf(l.id) || `${HOME}/.claude`}/.credentials.json` === path)
 
 function status(slot: string): string {
   const l = logins.find(x => x.id === idOf(slot) && x.isSignedIn)
@@ -245,6 +254,19 @@ export const register: Register = on => {
   on('store.keys', async ($, e, next) => (next.origin.plugin === MOD ? { value: [...store.keys()] } : next(e)))
 
   on('fs.write', async ($, e, next) => (next.origin.plugin === MOD ? { value: undefined } : next(e)))
+
+  // A credentials file the mod could not read is missing only where its folder lists without it.
+  on('fs.list', async ($, e, next) => {
+    if (next.origin.plugin !== MOD || !e.path.startsWith(`${HOME}/.claude`)) return next(e)
+    const isThere = fileLogin(`${e.path}/.credentials.json`) !== undefined
+    return { value: isThere ? [{ name: '.credentials.json', kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false }] : [] }
+  })
+
+  on('fs.read', async ($, e, next) => {
+    if (next.origin.plugin !== MOD || !e.path.endsWith('/.credentials.json')) return next(e)
+    const l = fileLogin(e.path)
+    return l === undefined ? { deny: 'no such file' } : { value: await signInOf($, l) }
+  })
 
   on('ui.notify', async ($, e, next) => (next.origin.plugin === MOD ? { value: { isSent: false, reason: 'refused' } } : next(e)))
 }

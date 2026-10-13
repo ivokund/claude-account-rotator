@@ -14,6 +14,8 @@ import {
   EMPTY_VIEW,
   LEAVE_FIVE_HOUR,
   credentialFrom,
+  credentialIn,
+  credentialsFile,
   footerStyleFrom,
   freeId,
   healthOf,
@@ -50,6 +52,15 @@ const CONFIRM_GIVE_UP_MS = 4 * 60_000
  * slot, overwriting that login: so no switch this close to the expiry.
  */
 const REFRESH_GUARD_MS = 8 * 60_000
+/**
+ * A credentials file read torn (not JSON) is taken for a refresh caught
+ * mid-write, a rewrite of milliseconds, until it stays torn past this: two of
+ * a held switch's retries, a minute apart. Then it is broken, and its login
+ * taken for signed out, as a keychain entry that is not JSON is.
+ */
+const TORN_GIVE_UP_MS = 2 * 60_000
+/** A file only macOS has: where `uname` gives no answer, it still tells the keychain's machine. */
+const MACOS_MARKER = '/System/Library/CoreServices/SystemVersion.plist'
 const CONTINUE =
   'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in. Continue where you left off.'
 
@@ -69,6 +80,10 @@ let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
 /** A switch the refresh guard holds back: the latest one asked for, tried again each minute until it goes. */
 let held: { target: Account; why: string; timer: Timer } | undefined
+/** Where Claude Code keeps logins on this machine, once known; an ask with no answer is kept a minute, then asked again. */
+let backendCheck: Promise<Backend | undefined> | undefined
+/** When each credentials file was first read torn, until a read finds it whole or gone. */
+const tornSince = new Map<string, number>()
 
 // ---------------------------------------------------------------- state
 // The view is this session's; the store is one JSON file every session of the
@@ -148,16 +163,112 @@ async function setFooter($: Host, change: Partial<FooterStyle>): Promise<void> {
 
 // ---------------------------------------------------------------- host
 
-type Stored = { state: 'present'; credential: Credential | undefined } | { state: 'absent' } | { state: 'unreadable'; code: number }
+type Backend = 'keychain' | 'file'
 
-/** A slot's stored login, read from the keychain; the secret stays in this module. */
+/**
+ * `from`: where the login is kept, and a hint, as the toast says them; none
+ * where there is nothing to tell but the debug log. `torn`: a file caught
+ * mid-write, as a token refresh can leave it.
+ */
+type Stored =
+  | { state: 'present'; credential: Credential | undefined }
+  | { state: 'absent' }
+  | { state: 'unreadable'; from?: string }
+  | { state: 'torn'; from: string }
+
+/**
+ * The keychain on macOS (Darwin), a file per login on any other system.
+ * Where `uname` gives no answer, macOS still shows by a file of its own;
+ * with neither, undefined, and no login is read.
+ */
+function backendOf($: Host): Promise<Backend | undefined> {
+  backendCheck ??= $.process
+    .run(['uname', '-s'], { timeoutMs: 10_000 })
+    .then(({ exitCode, stdout }): Backend => {
+      if (exitCode !== 0) throw new Error(`exit ${exitCode}`)
+      return stdout.trim() === 'Darwin' ? 'keychain' : 'file'
+    })
+    .catch(async (error: unknown): Promise<Backend | undefined> => {
+      await debug($, `uname -s failed: ${String(error)}`)
+      if (await $.fs.exists(MACOS_MARKER).catch(() => false)) return 'keychain'
+      $.clock.after(60_000, () => {
+        backendCheck = undefined
+      })
+      await debug($, 'no sign of macOS either, so no login is read for now')
+      return undefined
+    })
+  return backendCheck
+}
+
+/**
+ * A slot's stored login, read from the keychain, or on Linux from its file;
+ * the secret stays in this module. Only a keychain read rejects, as a
+ * `security` that cannot run always made it.
+ */
 async function readStored($: Host, slot: string): Promise<Stored> {
+  const backend = await backendOf($)
+  if (backend === undefined) return { state: 'unreadable' }
+  if (backend === 'keychain') return readKeychain($, slot)
+  return readCredentialsFile($, slot).catch(async (error: unknown): Promise<Stored> => {
+    await debug($, `reading the login in ${slot || '~/.claude'} failed: ${String(error)}`)
+    return { state: 'unreadable' }
+  })
+}
+
+async function readKeychain($: Host, slot: string): Promise<Stored> {
   const user = keychainUser(await $.env.get('USER'))
   const argv = ['security', 'find-generic-password', '-a', user, '-w', '-s', await keychainItem(slot)]
   const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 10_000 })
   if (exitCode === 44) return { state: 'absent' }
-  if (exitCode !== 0) return { state: 'unreadable', code: exitCode }
+  if (exitCode !== 0) return { state: 'unreadable', from: `the keychain (exit ${exitCode}); is it locked?` }
   return { state: 'present', credential: credentialFrom(stdout.trim()) }
+}
+
+async function readCredentialsFile($: Host, slot: string): Promise<Stored> {
+  const path = credentialsFile(slot, await $.env.get('HOME'))
+  if (path === undefined) return { state: 'unreadable', from: '~/.claude/.credentials.json; HOME is not set.' }
+  let text: string
+  try {
+    text = await $.fs.read(path)
+  } catch (error) {
+    if (await isMissing($, path)) {
+      tornSince.delete(path)
+      return { state: 'absent' }
+    }
+    await debug($, `reading ${path} failed: ${String(error)}`)
+    return { state: 'unreadable', from: `${path}; see the debug log.` }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    // Claude Code renames a new file into place, but rewrites it in place where
+    // it cannot: a read then can catch it empty or half written.
+    const now = await $.clock.now()
+    const since = tornSince.get(path) ?? now
+    tornSince.set(path, since)
+    if (now - since <= TORN_GIVE_UP_MS) return { state: 'torn', from: `${path}: not JSON, or caught mid-write.` }
+    return { state: 'present', credential: undefined }
+  }
+  tornSince.delete(path)
+  return { state: 'present', credential: credentialIn(parsed) }
+}
+
+/**
+ * Whether a path is missing, as the nearest folder above it that can be
+ * listed says: its next step down is not there. `fs.exists` cannot tell, being
+ * false under a folder that cannot be searched too.
+ */
+async function isMissing($: Host, path: string): Promise<boolean> {
+  for (let child = path; child.lastIndexOf('/') > 0; ) {
+    const dir = child.slice(0, child.lastIndexOf('/'))
+    const name = child.slice(dir.length + 1)
+    child = dir
+    if (name === '') continue
+    const names = await $.fs.list(dir).then(entries => entries.map(e => e.name), () => undefined)
+    if (names !== undefined) return !names.includes(name)
+  }
+  return false
 }
 
 type UsageAnswer = { kind: 'ok'; body: unknown } | { kind: 'rejected' } | { kind: 'failed'; status: number }
@@ -209,8 +320,8 @@ async function checkAccount($: Host, account: Account): Promise<void> {
   const now = await $.clock.now()
   if (signingIn === account.id) return
   const stored = await readStored($, account.slot)
-  if (stored.state === 'unreadable') {
-    tell($, `Could not read Claude account ${account.id} from the keychain (exit ${stored.code}); is it locked?`)
+  if (stored.state === 'unreadable' || stored.state === 'torn') {
+    if (stored.from !== undefined) tell($, `Could not read Claude account ${account.id} from ${stored.from}`)
     return
   }
   const credential = stored.state === 'present' ? stored.credential : undefined
@@ -270,7 +381,10 @@ async function switchTo($: Host, target: Account, why: string): Promise<boolean>
   if (active !== undefined && active.id !== target.id) {
     const stored = await readStored($, active.slot)
     const credential = stored.state === 'present' ? stored.credential : undefined
-    if (credential !== undefined && credential.expiresAt > now && credential.expiresAt - now < REFRESH_GUARD_MS) {
+    const isRefreshing =
+      stored.state === 'torn' ||
+      (credential !== undefined && credential.expiresAt > now && credential.expiresAt - now < REFRESH_GUARD_MS)
+    if (isRefreshing) {
       if (held === undefined) {
         tell($, `Switching to Claude account ${target.id} in a few minutes, once account ${active.id}'s token has refreshed.`)
         const retry = () => {

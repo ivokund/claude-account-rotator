@@ -255,13 +255,6 @@ export const register: Register = on => {
 
   on('fs.write', async ($, e, next) => (next.origin.plugin === MOD ? { value: undefined } : next(e)))
 
-  // A credentials file the mod could not read is missing only where its folder lists without it.
-  on('fs.list', async ($, e, next) => {
-    if (next.origin.plugin !== MOD || !e.path.startsWith(`${HOME}/.claude`)) return next(e)
-    const isThere = fileLogin(`${e.path}/.credentials.json`) !== undefined
-    return { value: isThere ? [{ name: '.credentials.json', kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false }] : [] }
-  })
-
   on('fs.read', async ($, e, next) => {
     if (next.origin.plugin !== MOD || !e.path.endsWith('/.credentials.json')) return next(e)
     const l = fileLogin(e.path)

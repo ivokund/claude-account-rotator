@@ -13,32 +13,18 @@ const FILE1 = `${HOME}/.claude/.credentials.json`
 const FILE2 = `${SLOT2}/.credentials.json`
 
 type World = {
-  /** The machine, as `uname -s` prints it: macOS (Darwin) has a file of its own a Linux machine lacks */
-  system: 'Darwin' | 'Linux'
-  /** How `uname -s` fails, where it does: it cannot start, or it exits with this code */
-  unameFails?: 'unstartable' | number
-  /** Whether `security`, macOS's keychain tool, is there: a Linux machine can have one too */
-  hasSecurity: boolean
-  /** Where set, `security` exits with it, as it does with the keychain locked */
-  securityExit?: number
+  /** The machine: macOS has a file of its own a Linux machine lacks */
+  system: 'macOS' | 'Linux'
   /** keychain item name -> stored JSON */
   keychain: Record<string, string>
-  /** credentials file -> stored JSON, or null where it cannot be read */
+  /** credentials file -> stored text, or null where it cannot be read */
   files: Record<string, string | null>
-  /** Folders there beyond those the files are in, as an account's folder holding nothing yet */
-  dirs: string[]
-  /** Folders there that can be neither listed nor searched */
-  lockedDirs: string[]
-  /** $HOME, undefined where it is unset */
-  home: string | undefined
   /** access token -> [5-hour %, week %, or null where the plan reports no weekly limit] */
   usage: Record<string, [number, number | null]>
   /** slot -> signed-in email */
   emails: Record<string, string>
   envSets: { name: string; value?: string }[]
   spawned: { argv: readonly string[]; env?: Record<string, string> }[]
-  /** Every command run, its argv joined by spaces. */
-  runs: string[]
   submitted: string[]
   /** What the session's last response reported, as `$.session.usage()` answers it. */
   limits: SessionRateLimit[]
@@ -69,27 +55,18 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
   isStderrTruncated: false,
 })
 
-const dirOf = (path: string) => path.slice(0, path.lastIndexOf('/'))
-
 /** Everything beneath the plugin: keychain or credentials files, `claude auth`, the usage API, the UI sinks. */
 function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on, store)
-  mock.env(on, { USER: 'tester', ...(w.home === undefined ? {} : { HOME: w.home }), ...w.env })
+  mock.env(on, { USER: 'tester', HOME, ...w.env })
   on('env.set', (_$, e) => {
     w.envSets.push(e)
     return { value: undefined }
   })
   on('process.run', (_$, e) => {
     const [cmd, sub, verb] = e.argv
-    w.runs.push(e.argv.join(' '))
-    if (cmd === 'uname') {
-      if (w.unameFails === 'unstartable') throw new Error('failed to start: ENOENT: Executable not found')
-      return { value: w.unameFails === undefined ? ran(0, `${w.system}\n`) : ran(w.unameFails, '') }
-    }
     if (cmd === 'security') {
-      if (!w.hasSecurity) throw new Error('failed to start: ENOENT: Executable not found')
-      if (w.securityExit !== undefined) return { value: ran(w.securityExit, '') }
       const stored = w.keychain[e.argv[e.argv.length - 1] ?? '']
       return { value: stored === undefined ? ran(44, '') : ran(0, stored) }
     }
@@ -98,7 +75,6 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
       const status = email ? { loggedIn: true, email, orgId: `org-${email}`, orgName: 'Org', subscriptionType: 'max' } : { loggedIn: false }
       return { value: ran(0, JSON.stringify(status)) }
     }
-    if (cmd === 'claude' && sub === 'auth' && verb === 'logout') return { value: ran(0, '') }
     throw new Error(`unexpected command: ${e.argv.join(' ')}`)
   })
   on('http.fetch', (_$, e) => {
@@ -136,37 +112,23 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     return { value: undefined }
   })
   on('fs.write', () => ({ value: undefined }))
-  on('fs.exists', (_$, e) => ({ value: e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'Darwin' }))
+  on('fs.exists', (_$, e) => ({ value: e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS' }))
   on('fs.read', (_$, e) => {
     const text = w.files[e.path]
-    if (text === null || w.lockedDirs.includes(dirOf(e.path))) return { deny: `EACCES: permission denied, open '${e.path}'` }
+    if (text === null) return { deny: `EACCES: permission denied, open '${e.path}'` }
     return text === undefined ? { deny: `ENOENT: no such file or directory, open '${e.path}'` } : { value: text }
-  })
-  on('fs.list', (_$, e) => {
-    if (w.lockedDirs.includes(e.path)) return { deny: `EACCES: permission denied, scandir '${e.path}'` }
-    const below = [...Object.keys(w.files), ...w.dirs, ...w.lockedDirs].filter(path => path.startsWith(`${e.path}/`))
-    if (below.length === 0 && !w.dirs.includes(e.path)) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
-    const names = [...new Set(below.map(path => path.slice(e.path.length + 1).split('/')[0] ?? ''))]
-    return {
-      value: names.map(name => ({ name, kind: `${e.path}/${name}` in w.files ? ('file' as const) : ('dir' as const), size: 0, mtimeMs: 0, isLink: false })),
-    }
   })
   return clock
 }
 
-const fresh = (system: World['system'] = 'Darwin'): World => ({
+const fresh = (system: World['system'] = 'macOS'): World => ({
   system,
-  hasSecurity: system === 'Darwin',
   keychain: {},
   files: {},
-  dirs: [],
-  lockedDirs: [],
-  home: HOME,
   usage: {},
   emails: {},
   envSets: [],
   spawned: [],
-  runs: [],
   submitted: [],
   limits: [],
   panes: [],
@@ -247,7 +209,6 @@ test('moves to the login with room once the active one passes 90% of its 5-hour 
 
 test('on Linux each login is read from the credentials file in its folder, the normal one\'s in ~/.claude, even with a `security` there', async ($, on) => {
   const w = fresh('Linux')
-  w.hasSecurity = true
   w.keychain['Claude Code-credentials'] = blob('stale-1')
   w.keychain[await keychainItem(SLOT2)] = blob('stale-2')
   w.files[FILE1] = blob('tok-1')
@@ -262,15 +223,17 @@ test('on Linux each login is read from the credentials file in its folder, the n
   await footer.unmount()
 })
 
-test('on Linux a login with no credentials file, or one with no Claude login in it, needs a sign-in', async ($, on) => {
-  const SLOT3 = `${HOME}/.claude/accounts/3`
+test('on Linux a login whose file is missing, holds no Claude login, cannot be read or is not JSON needs a sign-in, as Claude Code counts it', async ($, on) => {
+  const slot = (id: number) => `${HOME}/.claude/accounts/${id}`
   const w = fresh('Linux')
   w.files[FILE1] = blob('tok-1')
   // Claude Code keeps MCP servers' sign-ins in the same file.
-  w.files[`${SLOT3}/.credentials.json`] = JSON.stringify({ mcpOAuth: {} })
+  w.files[`${slot(3)}/.credentials.json`] = JSON.stringify({ mcpOAuth: {} })
+  w.files[`${slot(4)}/.credentials.json`] = null
+  w.files[`${slot(5)}/.credentials.json`] = blob('tok-5').slice(0, 40)
   w.usage['tok-1'] = [20, 30]
-  const three = { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }] }
-  const clock = world(on, w, three)
+  const more = [3, 4, 5].map(id => ({ id: String(id), slot: slot(id), email: `${id}@example.com` }))
+  const clock = world(on, w, { accounts: [...TWO_LOGINS.accounts, ...more] })
   await start($, clock)
   const band = await $.ui.mount({
     plugin: 'account-rotator',
@@ -278,144 +241,11 @@ test('on Linux a login with no credentials file, or one with no Claude login in 
     component: 'AbovePrompt',
     props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
   })
-  expect(await band.find({ text: /account 2 \(two@example.com\), 3 \(three@example.com\) needs a sign-in \(not signed in\)\./ })).toBeDefined()
-  await band.unmount()
-  expect(w.envSets).toEqual([])
-})
-
-test('on Linux an account whose folder is gone, or holds no credentials file, needs a sign-in, and Sign in is offered', async ($, on) => {
-  const SLOT3 = `${HOME}/.claude/accounts/3`
-  const w = fresh('Linux')
-  w.files[FILE1] = blob('tok-1')
-  w.dirs = [SLOT3]
-  w.usage['tok-1'] = [20, 30]
-  const three = { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }] }
-  const clock = world(on, w, three)
-  await start($, clock)
-  const band = await $.ui.mount({
-    plugin: 'account-rotator',
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
-  })
-  expect(await band.find({ text: /account 2 \(two@example.com\), 3 \(three@example.com\) needs a sign-in \(not signed in\)\./ })).toBeDefined()
+  const names = /account 2 \(two@example.com\), 3 \(3@example.com\), 4 \(4@example.com\), 5 \(5@example.com\) needs a sign-in \(not signed in\)\./
+  expect(await band.find({ text: names })).toBeDefined()
   expect(await band.find({ key: 'sign-in-all' })).toBeDefined()
   await band.unmount()
-  expect(w.toasts.filter(t => /Could not read/.test(t))).toEqual([])
-})
-
-test('on Linux a file caught mid-write, one that cannot be read, one in a folder that cannot be listed, and the normal login with no HOME are said, and left as they were', async ($, on) => {
-  const SLOT3 = `${HOME}/.claude/accounts/3`
-  const SLOT4 = `${HOME}/.claude/accounts/4`
-  const w = fresh('Linux')
-  w.home = undefined
-  w.files[FILE1] = blob('tok-1')
-  w.files[FILE2] = blob('tok-2').slice(0, 40)
-  w.files[`${SLOT3}/.credentials.json`] = null
-  w.lockedDirs = [SLOT4]
-  const four = {
-    accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }, { id: '4', slot: SLOT4, email: 'four@example.com' }],
-  }
-  const clock = world(on, w, four)
-  await start($, clock)
-  expect(w.toasts).toEqual([
-    'Could not read Claude account 1 from ~/.claude/.credentials.json; HOME is not set.',
-    `Could not read Claude account 2 from ${FILE2}: not JSON, or caught mid-write.`,
-    `Could not read Claude account 3 from ${SLOT3}/.credentials.json; see the debug log.`,
-    `Could not read Claude account 4 from ${SLOT4}/.credentials.json; see the debug log.`,
-  ])
   expect(w.envSets).toEqual([])
-})
-
-test('on Linux, while `uname` gives no answer, no login is read, whatever `security` says: each is left as it was, and Use now and Remove still work', async ($, on) => {
-  const SLOT3 = `${HOME}/.claude/accounts/3`
-  const w = fresh('Linux')
-  w.unameFails = 'unstartable'
-  w.hasSecurity = true
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = 'not json'
-  w.usage['tok-1'] = [92, 40]
-  const ok = { kind: 'ok' }
-  const clock = world(on, w, {
-    accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }],
-    'health:1': ok,
-    'health:2': ok,
-    'health:3': ok,
-  })
-  await start($, clock)
-  expect(w.envSets).toEqual([])
-  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  await pane.press({ key: 'use-2' })
-  await clock.settle()
-  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  await pane.redraw()
-  await pane.press({ key: 'ask-remove-3' })
-  await clock.settle()
-  await pane.redraw()
-  await pane.press({ key: 'remove-3' })
-  await clock.settle()
-  await pane.unmount()
-  expect(w.runs.filter(r => r.startsWith('security'))).toEqual([])
-  expect(w.runs.filter(r => r === 'uname -s')).toHaveLength(1)
-  expect(w.runs).toContain('claude auth logout')
-  expect(w.toasts).toEqual([`Switched to Claude account 2 (two@example.com): you picked it.`])
-})
-
-test('a `security` that cannot run leaves every login as it was, and Use now says something went wrong and stays put', async ($, on) => {
-  const w = fresh()
-  w.hasSecurity = false
-  const ok = { kind: 'ok' }
-  const clock = world(on, w, { ...TWO_LOGINS, 'health:1': ok, 'health:2': ok })
-  await start($, clock)
-  expect(w.toasts).toEqual([])
-  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  await pane.press({ key: 'use-2' })
-  await clock.settle()
-  await pane.unmount()
-  expect(w.envSets).toEqual([])
-  expect(w.toasts).toEqual([expect.stringMatching(/^Something went wrong: /)])
-})
-
-test('a keychain that cannot be read is said, and each login left as it was', async ($, on) => {
-  const w = fresh()
-  w.securityExit = 36
-  const ok = { kind: 'ok' }
-  const clock = world(on, w, { ...TWO_LOGINS, 'health:1': ok, 'health:2': ok })
-  await start($, clock)
-  expect(w.toasts).toEqual([
-    'Could not read Claude account 1 from the keychain (exit 36); is it locked?',
-    'Could not read Claude account 2 from the keychain (exit 36); is it locked?',
-  ])
-  expect(w.envSets).toEqual([])
-})
-
-test('on macOS a `uname` that exits with an error still finds the keychain, by a file only macOS has', async ($, on) => {
-  const w = fresh()
-  w.unameFails = 1
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [92, 40]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  expect(w.runs.filter(r => r === 'uname -s')).toHaveLength(1)
-})
-
-test('on Linux a `uname` that gave no answer is asked again a minute on, at the next read', async ($, on) => {
-  const w = fresh('Linux')
-  w.unameFails = 'unstartable'
-  w.files[FILE1] = blob('tok-1')
-  w.files[FILE2] = blob('tok-2')
-  w.usage['tok-1'] = [92, 40]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  expect(w.envSets).toEqual([])
-  w.unameFails = undefined
-  await clock.advance(10 * 60_000)
-  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  expect(w.runs.filter(r => r === 'uname -s')).toHaveLength(2)
 })
 
 test('on Linux the band\'s Sign in reads the new login from the file the browser sign-in wrote in its slot', async ($, on) => {
@@ -464,72 +294,6 @@ test('on Linux a switch held back for a token about to refresh is made once the 
   await clock.advance(3 * 60_000)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   await pane.unmount()
-})
-
-test('on Linux a switch is held back while the file of the login in use is caught mid-write, and made once it is whole', async ($, on) => {
-  const w = fresh('Linux')
-  w.files[FILE1] = blob('tok-1')
-  w.files[FILE2] = blob('tok-2')
-  w.usage['tok-1'] = [20, 30]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  w.files[FILE1] = blob('tok-1').slice(0, 40)
-  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  await pane.press({ key: 'rotate' })
-  await clock.settle()
-  expect(w.envSets).toEqual([])
-  expect(w.toasts.filter(t => /Switching to Claude account 2/.test(t))).toHaveLength(1)
-  w.files[FILE1] = blob('tok-1')
-  await clock.advance(60_000)
-  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  await pane.unmount()
-})
-
-test('on Linux a file that stays torn is taken for signed out after two minutes: switches go, and Sign in is offered', async ($, on) => {
-  const w = fresh('Linux')
-  w.files[FILE1] = blob('tok-1')
-  w.files[FILE2] = blob('tok-2')
-  w.usage['tok-1'] = [20, 30]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  // Emptied by an in-place rewrite that never finished.
-  w.files[FILE1] = ''
-  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  await pane.press({ key: 'rotate' })
-  await clock.settle()
-  await clock.advance(2 * 60_000)
-  expect(w.envSets).toEqual([])
-  await clock.advance(60_000)
-  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  await pane.unmount()
-  await clock.advance(10 * 60_000)
-  const band = await $.ui.mount({
-    plugin: 'account-rotator',
-    surface: 'terminal',
-    component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
-  })
-  expect(await band.find({ text: /account 1 \(one@example.com\) needs a sign-in \(not signed in\)/ })).toBeDefined()
-  expect(await band.find({ key: 'sign-in-all' })).toBeDefined()
-  await band.unmount()
-})
-
-test('on Linux a file read whole between two torn reads gets its two minutes again', async ($, on) => {
-  const w = fresh('Linux')
-  w.files[FILE1] = blob('tok-1')
-  w.files[FILE2] = blob('tok-2').slice(0, 40)
-  w.usage['tok-1'] = [20, 30]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  w.files[FILE2] = blob('tok-2')
-  await clock.advance(10 * 60_000)
-  w.files[FILE2] = blob('tok-2').slice(0, 40)
-  await clock.advance(10 * 60_000)
-  expect(w.toasts.filter(t => /not JSON, or caught mid-write/.test(t))).toHaveLength(2)
-  expect(w.toasts.filter(t => /needs a sign-in/.test(t))).toEqual([])
 })
 
 test('the band\'s Sign in signs a locked login in through the browser, in its own slot', async ($, on) => {

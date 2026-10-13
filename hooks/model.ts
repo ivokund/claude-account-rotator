@@ -137,11 +137,6 @@ export function credentialFrom(text: string): Credential | undefined {
     // An entry that is not JSON is no usable login: the caller asks for a sign-in.
     return undefined
   }
-  return credentialIn(parsed)
-}
-
-/** The login a parsed entry holds: none without a usable `claudeAiOauth`. */
-export function credentialIn(parsed: unknown): Credential | undefined {
   const oauth = (parsed as { claudeAiOauth?: unknown } | null)?.claudeAiOauth
   if (typeof oauth !== 'object' || oauth === null) return undefined
   const { accessToken, expiresAt, refreshTokenExpiresAt } = oauth as Record<string, unknown>

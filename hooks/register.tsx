@@ -850,7 +850,13 @@ async function signIn($: Host, account: Account): Promise<void> {
     running = undefined
     signingIn = undefined
   }
-  const code = await child.result.then(r => r.code, () => null)
+  // Keep `r?.code ?? null`, though ProcessSpawnResult says `r` is never undefined:
+  // after Cancel's return(), Claude Code fulfills the result with undefined, and
+  // the test kit cannot fake that, so no test fails if this goes back to `r.code`.
+  // That throws here, skips the save below, and leaves the login stuck at
+  // 'logging-in' behind a "Something went wrong" toast. `git log -S 'r?.code'`
+  // has the commit whose PR holds the repro.
+  const code = await child.result.then(r => r?.code ?? null, () => null)
   await saveHealth($, account.id, { kind: 'login-needed', why: 'sign-in not finished' })
   if (code !== 0) {
     tell($, `Sign-in for Claude account ${account.id} did not finish${errors.trim() ? `: ${errors.trim().slice(0, 160)}` : '.'}`)

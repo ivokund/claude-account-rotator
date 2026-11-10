@@ -553,7 +553,20 @@ async function onStopFailure($: Host, error: string): Promise<void> {
   const view = await getView($)
   const active = view.accounts.find(a => a.id === view.activeId)
   if (active === undefined) return
-  if (error === 'authentication_failed') {
+  const { pending } = view
+  if (pending !== undefined && (await $.clock.now()) - pending.since < SETTLE_MS) {
+    // Claude Code rereads a sign-in at most every 30 s: so soon after a switch, the turn may have gone out
+    // as the login the session left. The usage endpoint says which one is spent or locked; neither is presumed.
+    const from = view.accounts.find(a => a.id === pending.from)
+    if (from !== undefined) await checkAccount($, from)
+    await checkAccount($, active)
+    if (!shouldLeave(await getView($), await $.clock.now())) {
+      if (isConnectingChrome) isCutByVisit = true
+      // Once the switch lands, as a turn the switch itself cut short would.
+      else $.clock.after(Math.max(0, pending.since + SETTLE_MS - (await $.clock.now())), () => void $.prompt.submit({ text: CONTINUE }))
+      return
+    }
+  } else if (error === 'authentication_failed') {
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
   } else {

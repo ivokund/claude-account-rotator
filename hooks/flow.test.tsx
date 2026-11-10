@@ -530,6 +530,30 @@ test('a turn that dies on the usage limit moves to the other login, then asks Cl
   expect(w.submitted[0]).toMatch(/Continue where you left off/)
 })
 
+test('a turn that dies on the usage limit just after a switch, sent as the login left, leaves the new login be and carries on once the switch lands', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  // Claude Code still sends login 1's cached sign-in, and login 1 runs out.
+  await clock.advance(17_000)
+  w.usage['tok-1'] = [100, 40]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.find(GLYPHS))?.text).toMatch(/ 90% \n.* 70% $/)
+  await footer.unmount()
+  expect(w.envSets).toHaveLength(1)
+  expect(w.submitted).toEqual([])
+  await clock.advance(18_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+})
+
 test('a switch is confirmed once a response reports the new login usage, and an idle session is not told it failed', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')

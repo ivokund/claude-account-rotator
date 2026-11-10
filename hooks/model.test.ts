@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, keychainItem, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, keychainItem, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -183,6 +183,26 @@ test('a switch Claude Code\'s security policy refuses is told from any other fai
   expect(isPolicyRefusal(undefined)).toBe(false)
 })
 
+test('a session that can\'t switch says to stop a background session, which /exit leaves running, and to resume this conversation by its id', () => {
+  const onSeat = { ...view({ '1': [10, 10], '2': [100, 30] }), activeId: '2', sessionId: 'session-1', isSwitchBlocked: true }
+  expect(restartSteps(onSeat)).toBe('Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1')
+  expect(restartSteps({ ...onSeat, sessionId: undefined })).toMatch(/then run: claude --continue$/)
+  expect(blockedAdvice(onSeat)).toMatch(/starts or reloads plugins\. Fix: Quit \(in a background session, \/stop: \/exit only detaches\), then run: claude --resume session-1\. Not \/restart/)
+  expect(blockedAdvice(onSeat)).not.toMatch(/\/login/)
+  // Started on a seat as Claude Code's login: a personal sign-in there first, or the new session starts on the seat again.
+  const onLogin = { ...view({ '1': [100, 30], '2': [10, 10] }), sessionId: 'session-1', isSwitchBlocked: true }
+  expect(blockedAdvice(onLogin)).toMatch(/Fix: \/login with your personal \(Pro or Max\) account\. Quit .*claude --resume session-1\.$/)
+  // Spent where it can't leave, while another login has room: what to do.
+  expect(stuckText(onSeat, NOW)).toBe(
+    "Account 2 is out of usage, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
+  )
+  expect(stuckText(onLogin, NOW)).toMatch(/^Account 1 is out of usage, and this window can't switch accounts\. \/login with your personal \(Pro or Max\) account\. Quit /)
+  // Free to switch, with room, or with nowhere to go: nothing to say.
+  expect(stuckText({ ...onSeat, isSwitchBlocked: false }, NOW)).toBeUndefined()
+  expect(stuckText({ ...onSeat, activeId: '1' }, NOW)).toBeUndefined()
+  expect(stuckText({ ...view({ '1': [95, 30], '2': [100, 30] }), activeId: '2', isSwitchBlocked: true }, NOW)).toBeUndefined()
+})
+
 test('counts the browsers Claude in Chrome lists, and knows its words for none answering', () => {
   expect(browsersFrom('[{"deviceId":"d","name":"Browser 1","osPlatform":"macOS","isLocal":true}]')).toBe(1)
   expect(browsersFrom('[]')).toBe(0)
@@ -207,7 +227,9 @@ test('the notes about Claude in Chrome say what the mod does now and what to tel
   expect(chromeNote(base, 'held')).toMatch(/^The account-rotator mod is connecting Claude in Chrome as Claude account 1 \(one@example\.com\).* End your turn now/)
   expect(chromeNote(onTwo, 'no-browser')).toMatch(/^No Chrome extension answers as Claude account 1 \(one@example\.com\), the account picked for it in the Claude accounts panel: .* If it is another account, they press Use for Chrome or Try to connect next to it .* If it matches, they restart Chrome and press Connect above the prompt\./)
   const blocked = { ...onTwo, isSwitchBlocked: true }
-  expect(chromeNote(blocked, 'blocked')).toMatch(/Claude Code doesn't let this session switch accounts\. Tell the user that to use Chrome, they quit Claude Code and run `claude --resume session-1` in this terminal/)
+  expect(chromeNote(blocked, 'blocked')).toMatch(
+    /Claude Code doesn't let this session switch accounts\. Tell the user that to use Chrome, they quit Claude Code \(in a background session, with \/stop: \/exit only detaches\) and run `claude --resume session-1` in a terminal/,
+  )
   // Connected as the extension's account in a session that can't move: no Connect to press, Chrome to open.
   expect(chromeNote({ ...blocked, chrome: { as: '1', isPaired: false } }, 'no-browser')).toMatch(/If it matches, they restart Chrome, then you try again\./)
   expect(chromeNote({ ...onTwo, chromeAccountId: undefined }, 'unset')).toMatch(/doesn't know which one that is\. Ask the user to press Use for Chrome or Try to connect next to it under Chrome in the Claude accounts panel/)

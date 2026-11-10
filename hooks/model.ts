@@ -362,20 +362,41 @@ export function isOnNormalLogin(view: View): boolean {
  * terminal starts on the normal login already. `/login` there would sign in
  * the seat instead, as sign-ins follow the slot in use.
  */
-export function blockedAdvice(isNormalLogin: boolean): string {
-  return isNormalLogin
+export function blockedAdvice(view: View): string {
+  return isOnNormalLogin(view)
     ? "Claude Code doesn't let plugins switch accounts in a session that starts on a Team or Enterprise account. " +
-        'Fix: /login with your personal (Pro or Max) account, then restart Claude.'
+        `Fix: /login with your personal (Pro or Max) account. ${restartSteps(view)}.`
     : "Claude Code doesn't let plugins switch accounts once a session on a Team or Enterprise account starts or reloads plugins. " +
-        'Fix: quit Claude and run `claude --continue` or `claude --resume`. Not /restart, which keeps this account.'
+        `Fix: ${restartSteps(view)}. Not /restart, which keeps this account.`
 }
 
 /** What the mod says once Claude Code's security default refuses switching. */
-export function blockedText(isNormalLogin: boolean): string {
+export function blockedText(view: View): string {
   return (
-    `Can't switch accounts in this session. ${blockedAdvice(isNormalLogin)} ` +
+    `Can't switch accounts in this session. ${blockedAdvice(view)} ` +
     'More: https://github.com/ivokund/claude-account-rotator#team-and-enterprise-accounts'
   )
+}
+
+/**
+ * How to bring this conversation back in a new session, which starts on
+ * Claude Code's login. A background session goes on running when /exit or ←
+ * leaves it, and `claude --resume` then opens that same session again: /stop
+ * ends it first.
+ */
+export function restartSteps(view: View): string {
+  return `Quit (in a background session, /stop: /exit only detaches), then run: ${resumeCommand(view)}`
+}
+
+/**
+ * A session that can't switch, on a login that is spent while another has
+ * room: what the person does about it. Undefined otherwise; with every login
+ * spent, a new session would not help either.
+ */
+export function stuckText(view: View, now: number): string | undefined {
+  if (!view.isSwitchBlocked || !isSpent(view.readings[view.activeId], now) || pickTarget(view, now) === undefined) return undefined
+  const login = isOnNormalLogin(view) ? '/login with your personal (Pro or Max) account. ' : ''
+  return `Account ${view.activeId} is out of usage, and this window can't switch accounts. ${login}${restartSteps(view)}`
 }
 
 /** The MCP server Claude Code runs Claude in Chrome as, and the names of its tools. */
@@ -455,7 +476,7 @@ export function chromeNote(view: View, kind: ChromeNoteKind): string {
     case 'blocked':
       return (
         `${found} This session can't connect it as ${own}: Claude Code doesn't let this session switch accounts. ` +
-        `Tell the user that to use Chrome, they quit Claude Code and run \`${resumeCommand(view)}\` in this terminal, which brings this conversation back with Chrome connected. ${noLogin}`
+        `Tell the user that to use Chrome, they quit Claude Code (in a background session, with /stop: /exit only detaches) and run \`${resumeCommand(view)}\` in a terminal, which brings this conversation back with Chrome connected. ${noLogin}`
       )
     case 'unset':
       return (

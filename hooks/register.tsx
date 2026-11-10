@@ -30,8 +30,8 @@ import {
   identityFromStatus,
   isLoginOf,
   isNoBrowser,
-  isOnNormalLogin,
   isPolicyRefusal,
+  isSpent,
   keychainItem,
   keychainUser,
   label,
@@ -43,6 +43,7 @@ import {
   sameUsage,
   shouldLeave,
   slotEnv,
+  stuckText,
   windowPct,
 } from './model'
 import type { Credential, Identity } from './model'
@@ -301,7 +302,7 @@ async function blocked($: Host): Promise<boolean> {
   const view = await getView($)
   if (view.isSwitchBlocked) return false
   await setView($, v => ({ ...v, isSwitchBlocked: true }))
-  const text = blockedText(isOnNormalLogin(view))
+  const text = blockedText(view)
   $.ui.toast(text, { timeoutMs: 15_000 })
   await $.ui.notify(text, { title: TITLE })
   return true
@@ -435,12 +436,24 @@ function whyLeave(view: View, now: number): string {
 /**
  * Once the active login is spent or locked out, moves to the one the pane's
  * Rotation setting picks; never while it is off, Claude Code's policy refuses
- * it, or Connect holds the session where it is.
+ * it, or Connect holds the session where it is. Refused, it says once how to
+ * get a session that can move: a background session nobody watches gets the
+ * notification. Not from a turn that dies on the limit: Claude Code's security
+ * default, seated in such a session, passes its StopFailure hook over.
  */
 async function maybeRotate($: Host): Promise<boolean> {
   const now = await $.clock.now()
   const view = await getView($)
-  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now)) return false
+  if (view.isSwitchBlocked) {
+    const stuck = view.isStuckTold ? undefined : stuckText(view, now)
+    if (stuck !== undefined) {
+      await setView($, v => ({ ...v, isStuckTold: true }))
+      $.ui.toast(stuck, { timeoutMs: 15_000 })
+      await $.ui.notify(stuck, { title: TITLE })
+    }
+    return false
+  }
+  if (isConnectingChrome || view.rotateTo === 'off' || view.pending !== undefined || !shouldLeave(view, now)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
   return target === undefined ? false : switchTo($, target, whyLeave(view, now))
@@ -477,7 +490,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false):
   } catch (error) {
     if (!isPolicyRefusal(error)) throw error
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
-    if (!(await blocked($))) tell($, blockedText(isOnNormalLogin(await getView($))))
+    if (!(await blocked($))) tell($, blockedText(await getView($)))
     return false
   }
   const now = await $.clock.now()
@@ -677,15 +690,25 @@ async function keepChrome($: Host): Promise<void> {
 
 /**
  * Whether the session connects Claude in Chrome as it opens: an account is
- * named for the extension, signed in. Whatever usage it has left: connecting
- * uses its sign-in, not its usage. Later, a session Claude Code stops from
- * switching couldn't go there.
+ * named for the extension, and the session is on it, or can visit it: signed
+ * in, with room, and a browser answered there last time. Later, a session
+ * Claude Code stops from switching couldn't go there. A spent one is left be:
+ * a prompt sent during the visit would go out as it and hit its limit. One no
+ * browser answered as, while another did, is likely the extension's no more.
+ * Either connects at the first browser call that finds no browser instead.
  */
-function shouldConnectAtOpen(view: View): boolean {
+function shouldConnectAtOpen(view: View, now: number): boolean {
   const target = view.accounts.find(a => a.id === view.chromeAccountId)
   if (target === undefined || !canConnectChrome(view)) return false
+  if (target.id === view.activeId) return true
   const health = view.health[target.id]?.kind
-  return target.id === view.activeId || (health !== 'login-needed' && health !== 'logging-in')
+  const answered = view.chromeAccountIds ?? []
+  return (
+    health !== 'login-needed' &&
+    health !== 'logging-in' &&
+    !isSpent(view.readings[target.id], now) &&
+    (answered.length === 0 || answered.includes(target.id))
+  )
 }
 
 /**
@@ -1032,7 +1055,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
-  if (isInteractive && shouldConnectAtOpen(await getView($))) {
+  if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {
     void connectChrome($, true).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
   }
   // A live sign-in names its login as it checks; one whose token has run out, from what `claude auth login` left in its folder.

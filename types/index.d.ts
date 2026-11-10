@@ -87,6 +87,8 @@ export type View = {
   rotateTo: RotateTo
   /** This session only: Claude Code's security default refuses switching, as on a Team or Enterprise account. */
   isSwitchBlocked?: boolean
+  /** This session only: it was told that the login in use is spent and the session can't leave it. */
+  isStuckTold?: boolean
   /**
    * The account the Chrome extension is signed in to, the only one it answers:
    * picked in the pane, or learned when Claude in Chrome paired; kept across sessions.

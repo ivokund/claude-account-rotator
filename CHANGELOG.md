@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.3.1 - 2026-11-10
+
+- **A usage limit hit just after a switch no longer marks the account switched to as spent.** For about 30 seconds after a switch, Claude Code still sends the account it left, so a limit hit then is usually that one's. Before, the new account showed 0% left in the footer and the session moved on again. Now the rotator checks both accounts' usage, stays on the new one while it has room, and continues the turn once the switch lands. A sign-in rejected in those seconds no longer marks the new account as needing a sign-in either.
+
 ## 0.3.0 - 2026-10-16
 
 - **Other accounts** at the top of the panel's **Chrome** box lists the accounts no Chrome extension is known to answer as, each with **Try to connect**: for a Chrome opened on another account after the window started. The accounts that answer have **Use for Chrome**.

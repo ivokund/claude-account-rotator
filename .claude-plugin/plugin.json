@@ -1,6 +1,6 @@
 {
   "name": "account-rotator",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Moves Claude Code between your Claude accounts as their usage limits fill, shows each account's usage under the prompt, and signs an account back in with one click.",
   "author": {
     "name": "Ivo Kund"

@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.3.2 - 2026-11-10
+
+- **A window no longer opens on a spent account to connect Claude in Chrome.** Each window used to move to the account picked in the **Chrome** box for about 35 seconds as it opened, whatever usage that account had left, so a prompt sent then hit its limit. Now, while that account is out of usage, or while no browser answered as it last time but one did as another account, the window stays on its own account, and Claude in Chrome connects at the first browser call that finds no browser.
+- **A window that can't switch says what to do once its account runs out.** On a Team or Enterprise seat where Claude Code blocks switching, the line above the prompt, a toast and a notification name the spent account and give the command that brings the conversation back in a session that can switch.
+- **In a background session, the advice is now `/stop`, then `claude --resume <id>`.** `/exit` only detaches, so the session went on running on the blocked account, and `claude --resume` opened it again as it was.
+
 ## 0.3.1 - 2026-11-10
 
 - **A usage limit hit just after a switch no longer marks the account switched to as spent.** For about 30 seconds after a switch, Claude Code still sends the account it left, so a limit hit then is usually that one's. Before, the new account showed 0% left in the footer and the session moved on again. Now the rotator checks both accounts' usage, stays on the new one while it has room, and continues the turn once the switch lands. A sign-in rejected in those seconds no longer marks the new account as needing a sign-in either.

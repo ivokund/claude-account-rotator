@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -26,6 +26,7 @@ function view(
     activeId: '1',
     footer: DEFAULT_FOOTER,
     rotateTo,
+    startOn: 'login',
     hasFontBlocks: false,
   }
 }
@@ -150,6 +151,46 @@ test('a turn on Fable that hits a limit fills the Fable week where it is the ful
   expect(spentReading(r, NOW)).toEqual({ sevenDay: { pct: 100, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, at: NOW })
   const five = { fiveHour: { pct: 85, resetsAt: LATER }, sevenDay: { pct: 30, resetsAt: WEEK_END }, models: { Fable: { pct: 40, resetsAt: WEEK_END } }, at: NOW }
   expect(spentReading(five, NOW, 'Fable')).toEqual({ ...five, fiveHour: { pct: 100, resetsAt: LATER } })
+})
+
+test('a new session starts where a 5-hour window hasn\'t started: Claude Code\'s login if it qualifies, else the week resetting soonest; claimed, short of week, or locked ones are passed over', () => {
+  const soon = '2026-10-14T03:00:00Z'
+  const later = '2026-10-16T03:00:00Z'
+  const at = (v: View, id: string, five: number, week: number, weekResets: string) => {
+    v.readings[id] = { fiveHour: { pct: five, ...(five > 0 ? { resetsAt: LATER } : {}) }, sevenDay: { pct: week, resetsAt: weekResets }, at: NOW }
+  }
+  const v = view({ '1': [0, 0], '2': [0, 0], '3': [0, 0], '4': [0, 0] })
+  at(v, '1', 30, 40, later)
+  at(v, '2', 0, 50, later)
+  at(v, '3', 0, 20, soon)
+  at(v, '4', 10, 5, soon)
+  // Account 4's window is running; of 2 and 3, 3's week resets first.
+  expect(pickStart(v, NOW, {})?.id).toBe('3')
+  // Another new session claimed 3 a minute ago; ten minutes on, the claim has lapsed.
+  expect(pickStart(v, NOW, { '3': NOW - 60_000 })?.id).toBe('2')
+  expect(pickStart(v, NOW, { '3': NOW - 11 * 60_000 })?.id).toBe('3')
+  // Too little of its week left: it would soon move on.
+  at(v, '3', 0, 90, soon)
+  expect(pickStart(v, NOW, {})?.id).toBe('2')
+  // A login that needs a sign-in is no start.
+  expect(pickStart({ ...v, health: { ...v.health, '2': { kind: 'login-needed', why: 'x' } } }, NOW, {})).toBeUndefined()
+  // Claude Code's login, its own window not started, needs no switch.
+  at(v, '1', 0, 40, later)
+  expect(pickStart(v, NOW, {})?.id).toBe('1')
+  // A window that reset since its reading hasn't started again as far as is known: once 1's and 4's have, 1 is the start.
+  at(v, '1', 30, 40, later)
+  expect(pickStart(v, NOW, { '2': NOW })).toBeUndefined()
+  expect(pickStart(v, Date.parse(LATER) + 1, { '2': NOW })?.id).toBe('1')
+  // A week-only plan has no 5-hour window to start.
+  v.readings['3'] = { sevenDay: { pct: 20, resetsAt: soon }, at: NOW }
+  expect(pickStart(v, NOW, {})?.id).toBe('3')
+})
+
+test('a new Fable session starts only where the Fable week has room too', () => {
+  const v = view({ '1': [30, 40], '2': [0, 10], '3': [0, 20] })
+  v.readings['2'] = { ...v.readings['2']!, sevenDay: { pct: 10, resetsAt: '2026-10-14T03:00:00Z' }, models: { Fable: { pct: 90, resetsAt: WEEK_END } } }
+  expect(pickStart(v, NOW, {})?.id).toBe('2')
+  expect(pickStart({ ...v, model: 'claude-fable-5-2' }, NOW, {})?.id).toBe('3')
 })
 
 test('next in list moves to the login after the one in use, wrapping, past spent and locked ones', () => {

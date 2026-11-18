@@ -48,6 +48,12 @@ export type Fill = 'left' | 'used'
  */
 export type RotateTo = 'reset' | 'room' | 'order' | 'off'
 
+/**
+ * Where a new session starts: on Claude Code's login, or on an account whose
+ * 5-hour window hasn't started, so windows start early and refill early.
+ */
+export type StartOn = 'login' | 'fresh'
+
 /** The footer's look, picked in the pane and kept across sessions. */
 export type FooterStyle = {
   session: Glyphs
@@ -97,6 +103,8 @@ export type View = {
   footer: FooterStyle
   /** Which login the rotation moves to, picked in the pane and kept across sessions. */
   rotateTo: RotateTo
+  /** Where new sessions start, picked in the pane and kept across sessions. */
+  startOn: StartOn
   /** This session only: Claude Code's security default refuses switching, as on a Team or Enterprise account. */
   isSwitchBlocked?: boolean
   /** This session only: it was told that the login in use is spent and the session can't leave it. */

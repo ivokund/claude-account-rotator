@@ -11,13 +11,14 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, FooterStyle, Health, Holder, Reading, RotateTo, View } from '../types'
+import type { Account, FooterStyle, Health, Holder, Reading, RotateTo, StartOn, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
   EMPTY_VIEW,
   LEAVE_FIVE_HOUR,
   LEAVE_SEVEN_DAY,
+  START_CLAIM_MS,
   blockedText,
   browsersFrom,
   canConnectChrome,
@@ -38,6 +39,7 @@ import {
   keychainUser,
   label,
   modelWindow,
+  pickStart,
   pickTarget,
   rotateToFrom,
   readingFromLimits,
@@ -47,6 +49,7 @@ import {
   sameUsage,
   shouldLeave,
   slotEnv,
+  startOnFrom,
   spentReading,
   stuckText,
   viewScope,
@@ -194,6 +197,7 @@ async function mergeStore($: Host): Promise<void> {
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
+  const startOn = startOnFrom(await $.store.get('start-on'))
   const chrome = await $.store.get('chrome-account')
   const chromeAccountId = typeof chrome === 'string' && accounts.some(a => a.id === chrome) ? chrome : undefined
   const seen = await $.store.get('chrome-accounts')
@@ -215,7 +219,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, chromeAccountId, chromeAccountIds, usagePausedUntil }
+    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, startOn, chromeAccountId, chromeAccountIds, usagePausedUntil }
   })
 }
 
@@ -230,6 +234,39 @@ async function setFooter($: Host, change: Partial<FooterStyle>): Promise<void> {
 async function setRotateTo($: Host, rotateTo: RotateTo): Promise<void> {
   await $.store.set('rotate-to', rotateTo)
   await setView($, v => ({ ...v, rotateTo }))
+}
+
+/** Changes where new sessions start, for every session from now on. */
+async function setStartOn($: Host, startOn: StartOn): Promise<void> {
+  await $.store.set('start-on', startOn)
+  await setView($, v => ({ ...v, startOn }))
+}
+
+/**
+ * Where this new session starts, with "a fresh 5-hour window" picked: the
+ * login pickStart picks, claimed so the next new session starts elsewhere.
+ * Undefined with Claude Code's login picked, or where the session can't switch.
+ */
+async function startPick($: Host): Promise<Account | undefined> {
+  const view = await getView($)
+  if (view.startOn !== 'fresh' || view.isSwitchBlocked) return undefined
+  const now = await $.clock.now()
+  const stored = await $.store.get('start-claims')
+  const claims: Record<string, number> = {}
+  for (const [id, at] of Object.entries(typeof stored === 'object' && stored !== null ? stored : {})) {
+    if (typeof at === 'number' && now - at < START_CLAIM_MS) claims[id] = at
+  }
+  const pick = pickStart(view, now, claims)
+  if (pick !== undefined) await $.store.set('start-claims', { ...claims, [pick.id]: now })
+  return pick
+}
+
+/** Why a new session moved to `account` as it opened, as far as its reading tells. */
+function startWhy(view: View, account: Account): string {
+  const r = view.readings[account.id]
+  if (r === undefined) return 'it had no usage reading yet'
+  if (r.fiveHour === undefined) return 'its week resets soonest'
+  return "its 5-hour window hadn't started"
 }
 
 /** Names the account the Chrome extension is signed in to, for every session; none forgets it. */
@@ -910,17 +947,19 @@ function shouldConnectAtOpen(view: View, now: number): boolean {
  * the browser, or cut by a usage limit on the way. Quiet as the session opens:
  * the pane says how it went. Answers what the browsers did, where it asked them.
  */
-function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<ChromeAnswer | undefined> {
+function connectChrome($: Host, isQuiet = false, tryId?: string, start?: Account): Promise<ChromeAnswer | undefined> {
   if (isConnectingChrome) return Promise.resolve(undefined)
   isConnectingChrome = true
   return (async () => {
     let done: { target: Account; answer: ChromeAnswer; isVisit: boolean } | undefined
     try {
-      done = await connectingChrome($, isQuiet, tryId)
+      done = await connectingChrome($, isQuiet, tryId, start)
     } finally {
       isConnectingChrome = false
       await setView($, v => ({ ...v, chromeConnecting: undefined }))
     }
+    // A new session that was to start elsewhere, and Connect never ran: it moves there now.
+    if (done === undefined && start !== undefined) await switchTo($, start, startWhy(await getView($), start))
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
     const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
@@ -953,6 +992,7 @@ async function connectingChrome(
   $: Host,
   isQuiet: boolean,
   tryId: string | undefined,
+  start?: Account,
 ): Promise<{ target: Account; answer: ChromeAnswer; isVisit: boolean } | undefined> {
   const view = await getView($)
   const target = view.accounts.find(a => a.id === (tryId ?? view.chromeAccountId))
@@ -989,7 +1029,10 @@ async function connectingChrome(
     untaken.delete(target.id)
     await setView($, v => (v.pending?.id === target.id ? { ...v, pending: undefined } : v))
   }
-  if (isVisit) await leaveVisit($, from)
+  // Back to the login the session was on, or on to the one a new session starts on.
+  const to = start ?? from
+  if (to.id !== target.id) await leaveVisit($, to, start === undefined ? undefined : startWhy(await getView($), start))
+  else if (start !== undefined && isVisit) tell($, `Switched to Claude account ${label(start)}: ${startWhy(await getView($), start)}.`)
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as Claude account ${label(target)}.`)
   if (!isQuiet && answer === 'unpaired') {
     const back = isTrial ? view.accounts.find(a => a.id === view.chromeAccountId) : undefined
@@ -1003,21 +1046,22 @@ async function connectingChrome(
 }
 
 /**
- * After Connect's visit: back to the login the session was on, while it can
- * serve, or with the rotation off; else on to the one the rotation picks. The
- * extension's account's usage is not the session's to spend.
+ * After Connect's visit: to `to`, the login the session was on or the one a
+ * new session starts on, while it can serve, or with the rotation off; else on
+ * to the one the rotation picks. The extension's account's usage is not the
+ * session's to spend. Quietly back, or said, with `why`, for a new session.
  */
-async function leaveVisit($: Host, from: Account): Promise<void> {
+async function leaveVisit($: Host, to: Account, why?: string): Promise<void> {
   const now = await $.clock.now()
   const view = await getView($)
-  const health = view.health[from.id]?.kind
-  const canServe = health !== 'login-needed' && health !== 'logging-in' && !shouldLeave({ ...view, activeId: from.id }, now)
+  const health = view.health[to.id]?.kind
+  const canServe = health !== 'login-needed' && health !== 'logging-in' && !shouldLeave({ ...view, activeId: to.id }, now)
   if (view.rotateTo === 'off' || canServe) {
-    await switchTo($, from, 'back from connecting Claude in Chrome', true)
+    await switchTo($, to, why ?? 'back from connecting Claude in Chrome', why === undefined)
     return
   }
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
-  if (target !== undefined) await switchTo($, target, whyLeave({ ...view, activeId: from.id }, now))
+  if (target !== undefined) await switchTo($, target, whyLeave({ ...view, activeId: to.id }, now))
 }
 
 /**
@@ -1226,6 +1270,7 @@ function actions($: Host): Actions {
     remove: id => background(removeAccount($, id)),
     setFooter: change => background(setFooter($, change)),
     setRotateTo: rotateTo => background(setRotateTo($, rotateTo)),
+    setStartOn: startOn => background(setStartOn($, startOn)),
     tryChromeAccount: id => background(tryChromeAccount($, id)),
     toggleChromeOthers: () => background(setView($, v => ({ ...v, isChromeOthersShown: !v.isChromeOthersShown }))),
     connectChrome: () => background(connectChrome($)),
@@ -1257,9 +1302,14 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   await mergeStore($)
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }), ...(model === undefined ? {} : { model }) }))
   await checkSwitching($, slot)
-  // First, while the session can still move: the rotation waits for it.
+  // A new tab on Claude Code's login, with "a fresh 5-hour window" picked: where it starts.
+  const start = isInteractive && slot === '' ? await startPick($) : undefined
+  const startOn = start !== undefined && start.id !== activeId ? start : undefined
+  // First, while the session can still move: the rotation waits for it. Connect's visit ends where the session starts.
   if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {
-    void connectChrome($, true).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
+    void connectChrome($, true, undefined, startOn).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
+  } else if (startOn !== undefined) {
+    await switchTo($, startOn, startWhy(await getView($), startOn))
   }
   // A live sign-in names its login as it checks; one whose token has run out, from what `claude auth login` left in its folder.
   await checkAll($)

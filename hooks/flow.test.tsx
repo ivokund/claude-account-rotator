@@ -1933,3 +1933,127 @@ test('a Fable session\'s footer shows each account\'s fuller week, and with ever
   expect((await band.find({ text: /^Every Claude account is near its/ }))?.text).toMatch(/^Every Claude account is near its Fable limit; the next frees up in /)
   await band.unmount()
 })
+
+// Start on "a fresh 5-hour window": a new session on Claude Code's login moves to an account whose 5-hour window hasn't started.
+
+/** Three signed-in logins and their usage, read and checked before by another session too: [5-hour %, week %, week resets]. */
+async function threeLogins(usage: Record<'1' | '2' | '3', [number, number, string]>): Promise<{ w: World; store: Record<string, unknown> }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  const store: Record<string, unknown> = { ...THREE_LOGINS }
+  for (const id of ['1', '2', '3'] as const) {
+    const [five, week, resetsAt] = usage[id]
+    w.usage[`tok-${id}`] = [five, week, resetsAt]
+    store[`reading:${id}`] = {
+      fiveHour: { pct: five, ...(five > 0 ? { resetsAt: '2026-10-12T12:00:00Z' } : {}) },
+      sevenDay: { pct: week, resetsAt },
+      at: NOW - 60_000,
+    }
+    store[`health:${id}`] = { kind: 'ok' }
+  }
+  return { w, store }
+}
+
+const SOON = '2026-10-14T03:00:00Z'
+const LATER_WEEK = '2026-10-17T03:00:00Z'
+
+test('with Claude Code\'s login picked to start on, the default, a new session stays there though another account\'s 5-hour window hasn\'t started', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(w.envSets).toEqual([])
+  const pane = await mountPane($)
+  expect(await pane.find({ text: /New sessions start on it\./ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('with a fresh 5-hour window picked, a new session moves where one hasn\'t started, the week resetting soonest, and says why; the next new session starts on another', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  const clock = world(on, w, { ...store, 'start-on': 'fresh' })
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toEqual([expect.stringMatching(/^Switched to Claude account 2 .*: its 5-hour window hadn't started\.$/)])
+  const pane = await mountPane($)
+  expect(await pane.find({ text: /New sessions start on an account whose 5-hour window hasn't started, the one whose week resets soonest\./ })).toBeDefined()
+  expect(await pane.find({ text: /New sessions start on an account with a fresh 5-hour window, or on it when none has one\./ })).toBeDefined()
+  await pane.unmount()
+  // Another window opens on Claude Code's login: account 2 is claimed, so it starts on account 3. (This test's
+  // second window shares the first's process, so its start on Claude Code's login reads as a move there.)
+  await start($, clock)
+  expect(slots(w).filter(slot => slot !== '')).toEqual([SLOT2, SLOT3])
+})
+
+test('with a fresh 5-hour window picked, a new session stays on Claude Code\'s login while its own window hasn\'t started', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [0, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  const clock = world(on, w, { ...store, 'start-on': 'fresh' })
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(w.envSets).toEqual([])
+})
+
+test('with a fresh 5-hour window picked and Claude in Chrome connecting as a window opens, the visit ends on the account the session starts on', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [20, 30, LATER_WEEK], '3': [0, 20, SOON] })
+  w.chrome = { extensions: [SLOT2] }
+  const clock = world(on, w, { ...store, 'start-on': 'fresh', 'chrome-account': '2', 'chrome-accounts': ['2'] })
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  await clock.advance(36_000)
+  expect(w.chromeAsked).toEqual([SLOT2])
+  // Straight on from the visit to account 3, not back to account 1 first.
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toEqual([expect.stringMatching(/^Switched to Claude account 3 .*: its 5-hour window hadn't started\.$/)])
+})
+
+test('with a fresh 5-hour window picked on the Chrome extension\'s account, the visit to connect Claude in Chrome is where the session stays', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  w.chrome = { extensions: [SLOT2] }
+  const clock = world(on, w, { ...store, 'start-on': 'fresh', 'chrome-account': '2', 'chrome-accounts': ['2'] })
+  await start($, clock)
+  await clock.advance(36_000)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toEqual([expect.stringMatching(/^Switched to Claude account 2 .*: its 5-hour window hadn't started\.$/)])
+})
+
+test('with a fresh 5-hour window picked, where Connect can\'t run as the window opens, the session still moves to its start, once it may', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [20, 30, LATER_WEEK], '3': [0, 20, SOON] })
+  // Account 1's token refreshes in a few minutes: no switch off it until then, Connect's visit included.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+  w.chrome = { extensions: [SLOT2] }
+  const clock = world(on, w, { ...store, 'start-on': 'fresh', 'chrome-account': '2', 'chrome-accounts': ['2'] })
+  await start($, clock)
+  expect(slots(w)).toEqual([])
+  expect(w.toasts).toContain("Switching to Claude account 3 in a few minutes, once account 1's token has refreshed.")
+})
+
+test('with a fresh 5-hour window picked, a session that isn\'t interactive stays where it starts', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  const clock = world(on, w, { ...store, 'start-on': 'fresh' })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.envSets).toEqual([])
+})
+
+test('with a fresh 5-hour window picked, a session started on another account\'s slot stays there', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [0, 40, LATER_WEEK], '2': [30, 10, LATER_WEEK], '3': [0, 20, SOON] })
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const clock = world(on, w, { ...store, 'start-on': 'fresh' })
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([])
+})
+
+test('with a fresh 5-hour window picked, a session Claude Code won\'t let switch stays on its login', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  w.refuseEnv = true
+  const clock = world(on, w, { ...store, 'start-on': 'fresh' })
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([])
+})

@@ -1,4 +1,4 @@
-import type { Account, Fill, FooterStyle, Glyphs, Health, Highlight, Reading, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FooterStyle, Glyphs, Health, Highlight, Reading, RotateTo, StartOn, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -11,6 +11,13 @@ export const DEFAULT_FOOTER: FooterStyle = { session: 'braille', week: 'bars', s
 
 export const DEFAULT_ROTATE_TO: RotateTo = 'reset'
 
+export const DEFAULT_START_ON: StartOn = 'login'
+
+/** A new session starts on a fresh 5-hour window only where at least this much of the week is left (percent): less, and it would soon move on. */
+export const START_WEEK_LEFT = 15
+/** For this long after a new session picked an account to start on, the next new session counts its 5-hour window as started. */
+export const START_CLAIM_MS = 10 * 60_000
+
 export const EMPTY_VIEW: View = {
   accounts: [],
   readings: {},
@@ -19,6 +26,7 @@ export const EMPTY_VIEW: View = {
   activeId: '1',
   footer: DEFAULT_FOOTER,
   rotateTo: DEFAULT_ROTATE_TO,
+  startOn: DEFAULT_START_ON,
   hasFontBlocks: false,
 }
 
@@ -26,6 +34,7 @@ export const GLYPHS: readonly Glyphs[] = ['bars', 'pie', 'braille', 'none']
 export const HIGHLIGHTS: readonly Highlight[] = ['lines', 'tile', 'dim']
 export const FILLS: readonly Fill[] = ['left', 'used']
 export const ROTATE_TOS: readonly RotateTo[] = ['reset', 'room', 'order', 'off']
+export const START_ONS: readonly StartOn[] = ['login', 'fresh']
 
 const isOneOf = <T extends string>(value: unknown, allowed: readonly T[]): value is T =>
   typeof value === 'string' && (allowed as readonly string[]).includes(value)
@@ -33,6 +42,11 @@ const isOneOf = <T extends string>(value: unknown, allowed: readonly T[]): value
 /** Which login the rotation moves to, as stored; unknown is the default's. */
 export function rotateToFrom(value: unknown): RotateTo {
   return isOneOf(value, ROTATE_TOS) ? value : DEFAULT_ROTATE_TO
+}
+
+/** Where new sessions start, as stored; unknown is the default's. */
+export function startOnFrom(value: unknown): StartOn {
+  return isOneOf(value, START_ONS) ? value : DEFAULT_START_ON
 }
 
 /** The footer's look as stored; any part missing or unknown is the default's. */
@@ -184,6 +198,39 @@ export function pickTarget(view: View, now: number): Account | undefined {
       return after.find(a => ready.includes(a))
     }
   }
+}
+
+/**
+ * Where a new session starts with "a fresh 5-hour window" picked: a signed-in
+ * login with room whose 5-hour window hasn't started (at 0%, reset since its
+ * reading, unread, or none on a week-only plan), with START_WEEK_LEFT of its
+ * week left (and of the session's model week), and no other new session's
+ * claim on it within START_CLAIM_MS. Claude Code's login where it is one: no
+ * switch, and its connectors keep working. Else the one whose week resets
+ * soonest, so its room is used before it refills, the most room breaking ties.
+ */
+export function pickStart(view: View, now: number, claims: Readonly<Record<string, number>>): Account | undefined {
+  const scope = viewScope(view)
+  const weekLeft = (r: Reading | undefined) => Math.min(roomLeft(r?.sevenDay, now) ?? 100, roomLeft(modelWindow(r, scope), now) ?? 100)
+  const fresh = view.accounts.filter(a => {
+    const r = view.readings[a.id]
+    const claimed = claims[a.id]
+    return (
+      view.health[a.id]?.kind === 'ok' &&
+      !isSpent(r, now, scope) &&
+      (windowPct(r?.fiveHour, now) ?? 0) === 0 &&
+      weekLeft(r) >= START_WEEK_LEFT &&
+      (claimed === undefined || now - claimed >= START_CLAIM_MS)
+    )
+  })
+  const login = fresh.find(a => a.slot === '')
+  if (login !== undefined) return login
+  const reset = (a: Account) => {
+    const at = Date.parse(view.readings[a.id]?.sevenDay?.resetsAt ?? '')
+    return Number.isFinite(at) && at > now ? at : Infinity
+  }
+  const room = (a: Account) => weekLeft(view.readings[a.id])
+  return fresh.sort((a, b) => (reset(a) === reset(b) ? room(b) - room(a) : reset(a) < reset(b) ? -1 : 1))[0]
 }
 
 /** When the soonest spent window among all logins resets, epoch ms; the session's model week counts too. */

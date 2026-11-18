@@ -1,6 +1,6 @@
 import type { Elements, RenderChildren, RenderSurface } from 'claude-code'
 
-import type { Account, Fill, FooterRun, FooterStyle, Glyphs, Highlight, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FooterRun, FooterStyle, Glyphs, Highlight, RotateTo, StartOn, UsageWindow, View } from '../types'
 import {
   GLYPHS,
   LEAVE_FIVE_HOUR,
@@ -40,6 +40,7 @@ export type Actions = {
   remove: (id: string) => void
   setFooter: (change: Partial<FooterStyle>) => void
   setRotateTo: (rotateTo: RotateTo) => void
+  setStartOn: (startOn: StartOn) => void
   tryChromeAccount: (id: string) => void
   toggleChromeOthers: () => void
   connectChrome: () => void
@@ -309,6 +310,10 @@ const ROTATE_CHOICES = [
   ['order', 'next in list'],
   ['off', 'disabled'],
 ] as const satisfies readonly (readonly [RotateTo, string])[]
+const START_CHOICES = [
+  ['login', "Claude Code's login"],
+  ['fresh', 'a fresh 5-hour window'],
+] as const satisfies readonly (readonly [StartOn, string])[]
 const PREVIEW_CHOICES = [
   ['real', 'your usage'],
   ['demo', 'demo values'],
@@ -353,10 +358,11 @@ function FooterSettings(ui: Ui, view: View, act: Actions) {
   ])
 }
 
-/** Which login the rotation moves to. */
+/** Which login the rotation moves to, and where new sessions start. */
 function RotationSettings(ui: Ui, view: View, act: Actions) {
   return section(ui, 'rotation', 'Usage based rotation', [
     choice(ui, 'rotate-to', 'Move to', ROTATE_CHOICES, view.rotateTo, act.setRotateTo),
+    choice(ui, 'start-on', 'Start on', START_CHOICES, view.startOn, act.setStartOn),
   ])
 }
 
@@ -689,8 +695,9 @@ const RULE_TARGETS: Record<Exclude<RotateTo, 'off'>, string> = {
  * or what is used), and where to; for a session on a model with a week of its
  * own, that week too.
  */
-function rule(fill: Fill, rotateTo: RotateTo, scope?: string): string {
-  if (rotateTo === 'off') return 'Rotation is disabled: the session stays on the account in use until you pick another.'
+function rule(fill: Fill, rotateTo: RotateTo, scope: string | undefined, startOn: StartOn): string {
+  const start = startOn === 'fresh' ? " New sessions start on an account whose 5-hour window hasn't started, the one whose week resets soonest." : ''
+  if (rotateTo === 'off') return `Rotation is disabled: the session stays on the account in use until you pick another.${start}`
   const model =
     scope === undefined
       ? ''
@@ -701,7 +708,7 @@ function rule(fill: Fill, rotateTo: RotateTo, scope?: string): string {
     fill === 'left'
       ? `Once the account in use has ${100 - LEAVE_FIVE_HOUR}% of its 5-hour window or ${100 - LEAVE_SEVEN_DAY}% of its week${model} left`
       : `Once the account in use has used ${LEAVE_FIVE_HOUR}% of its 5-hour window or ${LEAVE_SEVEN_DAY}% of its week${model}`
-  return `${when}, moves to ${RULE_TARGETS[rotateTo]}.`
+  return `${when}, moves to ${RULE_TARGETS[rotateTo]}.${start}`
 }
 
 /** The pane's first line while Claude Code's security policy refuses every switch. */
@@ -726,7 +733,9 @@ function LoginLine({ Text }: Ui, view: View) {
     `Claude Code's login: account ${normal.id}${who.email === undefined ? '' : ` (${who.email})`}${who.plan === undefined ? '' : `, ${planText(who.plan)}`}.`,
     isSeat
       ? "New sessions start on it, and can't switch accounts: /login with your personal (Pro or Max) account in a session on it, then restart Claude."
-      : 'New sessions start on it.',
+      : view.startOn === 'fresh'
+        ? 'New sessions start on an account with a fresh 5-hour window, or on it when none has one.'
+        : 'New sessions start on it.',
     ...(view.activeId === normal.id ? [] : [`/login in this session signs in account ${view.activeId} instead.`]),
   ]
   return (
@@ -763,7 +772,7 @@ export function Pane(ui: Ui, view: View, now: number, act: Actions) {
   ]
   return (
     <Box flexDirection="column" rowGap={1}>
-      {view.isSwitchBlocked ? <Text color="warning">{blockedRule(view)}</Text> : <Text dimColor>{rule(view.footer.fill, view.rotateTo, viewScope(view))}</Text>}
+      {view.isSwitchBlocked ? <Text color="warning">{blockedRule(view)}</Text> : <Text dimColor>{rule(view.footer.fill, view.rotateTo, viewScope(view), view.startOn)}</Text>}
       {LoginLine(ui, view)}
       {section(ui, 'accounts', 'Accounts', accounts)}
       {(view.hasChrome === true || view.chromeAccountId !== undefined || (view.chromeAccountIds?.length ?? 0) > 0) && ChromeSettings(ui, view, act)}

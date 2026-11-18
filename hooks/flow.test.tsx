@@ -1699,3 +1699,29 @@ test('a session without Claude in Chrome is asked once, and its pane has no Chro
   expect(await pane.find({ text: /Chrome/ })).toBeUndefined()
   await pane.unmount()
 })
+
+test('a sign-in Claude Code ends with no result, as it does after Cancel, ends as not finished and offers Sign in again', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  // After Cancel's return(), Claude Code fulfills the spawn's result with undefined; the kit rejects it instead.
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: 'Opening browser to sign in…\n' }
+    return { value: undefined as never }
+  })
+  await start($, clock)
+  const band = await $.ui.mount({
+    plugin: 'account-rotator',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+  })
+  await band.press({ key: 'sign-in-all' })
+  await clock.settle()
+  expect(w.toasts.at(-1)).toBe('Sign-in for Claude account 2 did not finish.')
+  await band.redraw()
+  expect(await band.find({ key: 'cancel-sign-in' })).toBeUndefined()
+  expect(await band.find({ key: 'sign-in-all' })).toBeDefined()
+  await band.unmount()
+})

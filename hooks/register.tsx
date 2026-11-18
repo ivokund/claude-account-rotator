@@ -1058,7 +1058,9 @@ async function signIn($: Host, account: Account): Promise<void> {
     running = undefined
     signingIn = undefined
   }
-  const code = await child.result.then(r => r.code, () => null)
+  // After Cancel's return(), Claude Code fulfills the result with undefined, against
+  // its type. Reading r.code then would throw past the save below, stuck at 'logging-in'.
+  const code = await child.result.then(r => r?.code ?? null, () => null)
   await saveHealth($, account.id, { kind: 'login-needed', why: 'sign-in not finished' })
   if (code !== 0) {
     tell($, `Sign-in for Claude account ${account.id} did not finish${errors.trim() ? `: ${errors.trim().slice(0, 160)}` : '.'}`)

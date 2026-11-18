@@ -87,32 +87,57 @@ export function shouldLeave(view: View, now: number): boolean {
   return view.health[view.activeId]?.kind === 'login-needed' || isSpent(view.readings[view.activeId], now)
 }
 
-/** When a login's 5-hour window resets, epoch ms; Infinity while none is running. */
-function fiveHourReset(r: Reading | undefined, now: number): number {
-  const w = r?.fiveHour
+/**
+ * The window that limits a login: its week where its reading has a week and
+ * no 5-hour window, as an Ultra plan's does; else its 5-hour window.
+ */
+export function limitingWindow(r: Reading | undefined): 'fiveHour' | 'sevenDay' {
+  return r?.fiveHour === undefined && r?.sevenDay !== undefined ? 'sevenDay' : 'fiveHour'
+}
+
+/**
+ * The room a login has to rotate to: what it can serve right now, or, where
+ * its plan reports no 5-hour window, its week's room. A 5-hour window that
+ * reset since its reading stays unknown, which the rotation counts as fresh.
+ */
+export function roomOf(r: Reading | undefined, now: number): number | undefined {
+  return limitingWindow(r) === 'sevenDay' ? roomLeft(r?.sevenDay, now) : availableNow(r, now)
+}
+
+/** When the window that limits a login resets, epoch ms; Infinity while none is running. */
+function limitReset(r: Reading | undefined, now: number): number {
+  const w = r?.[limitingWindow(r)]
   if (w?.resetsAt === undefined || (windowPct(w, now) ?? 0) === 0) return Infinity
   return Date.parse(w.resetsAt)
+}
+
+/** A login's reading once a turn hit its usage limit before its usage showed it: the window that limits it, full. */
+export function spentReading(r: Reading | undefined, now: number): Reading {
+  const key = limitingWindow(r)
+  const resetsAt = r?.[key]?.resetsAt
+  return { ...r, [key]: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now }
 }
 
 /**
  * The signed-in login below both thresholds to move to, as `rotateTo` picks:
  * the one that can serve the most right now (unread counts as fresh); the one
- * whose 5-hour window resets soonest, so room about to refill is used first,
- * the most room breaking ties; or the next in the list after the one in use.
- * With the rotation off, Rotate now takes the one with the most room.
+ * whose limit (its 5-hour window, or its week) resets soonest, so room about
+ * to refill is used first, the most room breaking ties; or the next in the
+ * list after the one in use. With the rotation off, Rotate now takes the one
+ * with the most room.
  */
 export function pickTarget(view: View, now: number): Account | undefined {
   const ready = view.accounts.filter(
     a => a.id !== view.activeId && view.health[a.id]?.kind === 'ok' && !isSpent(view.readings[a.id], now),
   )
-  const available = (a: Account) => availableNow(view.readings[a.id], now) ?? 100
+  const available = (a: Account) => roomOf(view.readings[a.id], now) ?? 100
   const byRoom = (a: Account, b: Account) => available(b) - available(a)
   switch (view.rotateTo) {
     case 'room':
     case 'off':
       return ready.sort(byRoom)[0]
     case 'reset': {
-      const reset = (a: Account) => fiveHourReset(view.readings[a.id], now)
+      const reset = (a: Account) => limitReset(view.readings[a.id], now)
       return ready.sort((a, b) => (reset(a) === reset(b) ? byRoom(a, b) : reset(a) < reset(b) ? -1 : 1))[0]
     }
     case 'order': {

@@ -20,7 +20,8 @@ type World = {
   /** credentials file -> stored text, or null where it cannot be read */
   files: Record<string, string | null>
   /** access token -> [5-hour %, week %, or null where the plan reports no weekly limit] */
-  usage: Record<string, [number, number | null]>
+  /** Per token, the 5-hour and the week percent used; null for a window the plan does not report. */
+  usage: Record<string, [number | null, number | null]>
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -141,7 +142,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week] = usage
     const body = {
-      five_hour: { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
+      five_hour: five === null ? null : { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
       seven_day: week === null ? null : { utilization: week, resets_at: '2026-10-18T03:00:00Z' },
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
@@ -595,6 +596,25 @@ test('a turn that dies on the usage limit moves to the other login, then asks Cl
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
   expect(w.submitted[0]).toMatch(/Continue where you left off/)
+})
+
+test('a turn that dies on the usage limit of a login with no 5-hour window moves on, its week counted as full, not a 5-hour window', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  // Ultra plans report a week alone.
+  w.usage['tok-1'] = [null, 60]
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  const pane = await mountPane($)
+  // Its week shows spent, and no made-up 5-hour window stands beside it.
+  expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/5h·{10} none reportedweek▱{10} 0% left/)
+  await pane.unmount()
 })
 
 test('a turn that dies on the usage limit just after a switch, sent as the login left, leaves the new login be and carries on once the switch lands', async ($, on) => {

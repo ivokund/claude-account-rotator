@@ -44,6 +44,7 @@ import {
   sameUsage,
   shouldLeave,
   slotEnv,
+  spentReading,
   stuckText,
   windowPct,
 } from './model'
@@ -759,10 +760,8 @@ async function onStopFailure($: Host, error: string): Promise<void> {
     const now = await $.clock.now()
     const after = await getView($)
     if (!shouldLeave(after, now)) {
-      // The limit was hit before the usage call shows it: count the 5-hour window as full.
-      const r = after.readings[active.id]
-      const resetsAt = r?.fiveHour?.resetsAt
-      await saveReading($, active.id, { ...r, fiveHour: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now })
+      // The limit was hit before the usage call shows it: count the window that limits the login as full.
+      await saveReading($, active.id, spentReading(after.readings[active.id], now))
     }
   }
   await setView($, v => ({ ...v, pending: undefined }))

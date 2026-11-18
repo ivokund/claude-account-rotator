@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isSpent, keychainItem, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct } from './model'
+import type { Reading, RotateTo, View } from '../types'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -71,6 +71,36 @@ test('soonest reset moves to the login whose 5-hour window resets first, never a
   // Two resets at once: the more room wins.
   resetsAt(v, '2', '2026-10-12T11:00:00Z')
   expect(pickTarget(v, NOW)?.id).toBe('2')
+})
+
+test('a login whose plan reports no 5-hour window is ranked by its week: its room, and when it resets', () => {
+  const weekOnly = (pct: number, resetsAt = WEEK_END): Reading => ({ sevenDay: { pct, resetsAt }, at: NOW })
+  const v = view({ '1': [95, 50], '2': [0, 0], '3': [0, 0] })
+  v.readings['2'] = weekOnly(60, '2026-10-16T03:00:00Z')
+  v.readings['3'] = weekOnly(20, '2026-10-14T03:00:00Z')
+  // Not 100% free each, which left the first on the list.
+  expect(roomOf(v.readings['2'], NOW)).toBe(40)
+  expect(pickTarget(v, NOW)?.id).toBe('3')
+  v.readings['3'] = weekOnly(80, '2026-10-14T03:00:00Z')
+  expect(pickTarget(v, NOW)?.id).toBe('2')
+  // Soonest reset goes by when each week resets.
+  expect(pickTarget({ ...v, rotateTo: 'reset' }, NOW)?.id).toBe('3')
+  v.readings['3'] = weekOnly(95, '2026-10-14T03:00:00Z')
+  expect(pickTarget({ ...v, rotateTo: 'reset' }, NOW)?.id).toBe('2')
+  // Beside a login with a 5-hour window, each by its own limit.
+  const mixed = view({ '1': [95, 50], '2': [0, 0], '3': [50, 10] })
+  mixed.readings['2'] = weekOnly(70)
+  expect(pickTarget(mixed, NOW)?.id).toBe('3')
+  // A 5-hour window that reset since its reading stays fresh, not its week's room.
+  expect(roomOf({ fiveHour: { pct: 97, resetsAt: LATER }, sevenDay: { pct: 60, resetsAt: WEEK_END }, at: NOW }, Date.parse(LATER) + 1)).toBeUndefined()
+})
+
+test('a limit hit before the usage shows it fills the window that limits the login, keeping its reset', () => {
+  const five = { fiveHour: { pct: 40, resetsAt: LATER }, sevenDay: { pct: 60, resetsAt: WEEK_END }, at: NOW - 1 }
+  expect(spentReading(five, NOW)).toEqual({ fiveHour: { pct: 100, resetsAt: LATER }, sevenDay: { pct: 60, resetsAt: WEEK_END }, at: NOW })
+  expect(spentReading({ sevenDay: { pct: 60, resetsAt: WEEK_END }, at: NOW - 1 }, NOW)).toEqual({ sevenDay: { pct: 100, resetsAt: WEEK_END }, at: NOW })
+  // No reading yet: the 5-hour window, as before.
+  expect(spentReading(undefined, NOW)).toEqual({ fiveHour: { pct: 100 }, at: NOW })
 })
 
 test('next in list moves to the login after the one in use, wrapping, past spent and locked ones', () => {

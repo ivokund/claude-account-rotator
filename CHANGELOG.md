@@ -2,6 +2,14 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.4.2 - 2026-11-18
+
+- **Accounts on a plan with no 5-hour window rotate by their week.** Ultra plans report a week alone, and the rotation counted such an account as fully free with no reset time: **most room** and **soonest reset** both took the first one on the list, and a usage limit hit there marked a 5-hour window the plan doesn't have. Now the week decides for such an account: the room it has left, when it resets, and a limit hit fills it. Accounts with a 5-hour window rotate as before.
+- **A dropped Claude in Chrome connection is caught however Claude Code reports it.** Claude Code sometimes reports a browser call that found no browser as an ordinary result, not an error, and `list_connected_browsers` can list none. The mod took both as a browser answering, so it never reconnected. Now both count as no browser, and the mod reconnects as it does after the error.
+- **Rate-limited usage checks wait as long as Anthropic asks.** After a rate-limited check, every session waited 5 minutes. When Anthropic's answer asks for longer, they now wait that long, up to an hour, and the panel says when checks resume.
+
+These come from Nathan Broadbent's fork of the rotator. Thanks, Nathan!
+
 ## 0.4.1 - 2026-11-18
 
 - **Cancel during a browser sign-in now ends it cleanly.** Pressing **Cancel** while a **Sign in** or **+ Add an account** waited on the browser showed "Something went wrong: TypeError…", and the account stayed at "signing in…" with **Cancel** still up. Now the usual "Sign-in for Claude account N did not finish." toast shows, and the account offers **Sign in** again. Thanks to @andrest (#3).

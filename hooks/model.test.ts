@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -234,6 +234,17 @@ test('a session that can\'t switch says to stop a background session, which /exi
   expect(stuckText({ ...onSeat, isSwitchBlocked: false }, NOW)).toBeUndefined()
   expect(stuckText({ ...onSeat, activeId: '1' }, NOW)).toBeUndefined()
   expect(stuckText({ ...view({ '1': [95, 30], '2': [100, 30] }), activeId: '2', isSwitchBlocked: true }, NOW)).toBeUndefined()
+})
+
+test('a browser call found no browser when Claude Code says so as an error or as a whole result, or the list of browsers is empty; not when a page mentions it', () => {
+  const words = 'Browser extension is not connected: the OAuth token Claude Code is using belongs to a different claude.ai account.'
+  expect(isUnansweredCall('mcp__claude-in-chrome__tabs_context_mcp', words, true)).toBe(true)
+  expect(isUnansweredCall('mcp__claude-in-chrome__tabs_context_mcp', words, false)).toBe(true)
+  expect(isUnansweredCall('mcp__claude-in-chrome__tabs_context_mcp', `Error: ${words}`, false)).toBe(true)
+  expect(isUnansweredCall('mcp__claude-in-chrome__get_page_text', `Troubleshooting\n\nIf you see "${words}", sign in again.`, false)).toBe(false)
+  expect(isUnansweredCall('mcp__claude-in-chrome__list_connected_browsers', '[]', false)).toBe(true)
+  expect(isUnansweredCall('mcp__claude-in-chrome__list_connected_browsers', '[{"deviceId":"d"}]', false)).toBe(false)
+  expect(isUnansweredCall('mcp__claude-in-chrome__get_page_text', '[]', false)).toBe(false)
 })
 
 test('counts the browsers Claude in Chrome lists, and knows its words for none answering', () => {

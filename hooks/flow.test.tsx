@@ -46,7 +46,8 @@ type World = {
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
    * connection was made as.
    */
-  chrome?: { extensions: string[]; as?: string }
+  /** `asText`: Claude Code words a call that finds no browser as an ordinary result, not an error. */
+  chrome?: { extensions: string[]; as?: string; asText?: boolean }
   /** The slot in use at each of the mod's calls to Claude in Chrome, the session having it or not. */
   chromeAsked: string[]
   /** The slash commands the mod ran, as typed. */
@@ -164,8 +165,14 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     const browsers = isAnswered(w.chrome) ? [{ deviceId: 'device-1', name: 'Browser 1', osPlatform: 'macOS', isLocal: true }] : []
     return { value: { content: [{ type: 'text', text: JSON.stringify(browsers) }], isError: false } }
   })
-  on('tool.call', { tool: /^mcp__claude-in-chrome__/ }, () => {
-    if (w.chrome !== undefined && isAnswered(w.chrome)) return { result: [{ type: 'text', text: 'Tabs: none' }], text: 'Tabs: none' }
+  on('tool.call', { tool: /^mcp__claude-in-chrome__/ }, (_$, e) => {
+    const isListed = e.tool.endsWith('__list_connected_browsers')
+    if (w.chrome !== undefined && isAnswered(w.chrome)) {
+      const text = isListed ? JSON.stringify([{ deviceId: 'device-1', name: 'Browser 1' }]) : 'Tabs: none'
+      return { result: [{ type: 'text', text }], text }
+    }
+    if (isListed) return { result: [{ type: 'text', text: '[]' }], text: '[]' }
+    if (w.chrome?.asText === true) return { result: [{ type: 'text', text: NO_BROWSER }], text: NO_BROWSER }
     return { isError: true as const, result: NO_BROWSER, text: NO_BROWSER }
   })
   on('command.run', { command: 'mcp' }, (_$, e) => {
@@ -1744,4 +1751,45 @@ test('a sign-in Claude Code ends with no result, as it does after Cancel, ends a
   expect(await band.find({ key: 'cancel-sign-in' })).toBeUndefined()
   expect(await band.find({ key: 'sign-in-all' })).toBeDefined()
   await band.unmount()
+})
+
+test('a dropped connection that Claude Code reports as an ordinary result, not an error, has the mod reconnect it all the same', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''], asText: true }
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  await spentOne(w)
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '1' })
+  await start($, clock)
+  await clock.advance(36_000)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual(['', SLOT2])
+  w.chrome.as = SLOT2
+  const called = await browse($, 'tabs_context_mcp', { createIfEmpty: true })
+  expect(called.isError).toBeUndefined()
+  expect(called.context?.[0]).toMatch(/^Claude in Chrome connected as Claude account 1 \(one@example\.com\) and found no browser\. The account-rotator mod is now reconnecting it/)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
+  expect(w.toasts).toContain('Claude in Chrome is connected as Claude account 1 (one@example.com).')
+  expect(slots(w)).toEqual(['', SLOT2, '', SLOT2])
+})
+
+test('list_connected_browsers listing none counts as a dropped connection, and has the mod reconnect it', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  await spentOne(w)
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '1' })
+  await start($, clock)
+  await clock.advance(36_000)
+  await clock.advance(36_000)
+  w.chrome.as = SLOT2
+  const called = await browse($, 'list_connected_browsers')
+  expect(called.text).toBe('[]')
+  expect(called.context?.[0]).toMatch(/The account-rotator mod is now reconnecting it/)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
+  // Once connected, a list with a browser in it is no drop.
+  expect((await browse($, 'list_connected_browsers')).context).toBeUndefined()
 })

@@ -453,6 +453,20 @@ export function browsersFrom(text: string): number | undefined {
   }
 }
 
+/** How Claude Code's words for a browser call that found no browser begin, as a whole result rather than words on a page. */
+const NO_BROWSER_START = /^\s*(?:Error:\s*)?(?:Browser extension is not connected|No Chrome extension connected|[^\n]{0,80}isn't paired with your browser)/
+
+/**
+ * Whether a browser call found no browser. Claude Code answers that as an
+ * error, or as an ordinary result: one counts when it begins with its words
+ * (a page's own text that mentions them doesn't), and list_connected_browsers
+ * when it lists none.
+ */
+export function isUnansweredCall(tool: string, text: string, isError: boolean): boolean {
+  if (isNoBrowser(text) && (isError || NO_BROWSER_START.test(text))) return true
+  return tool.endsWith('__list_connected_browsers') && browsersFrom(text) === 0
+}
+
 /** Whether a browser call's error says no browser answered, as Claude Code words it over its bridge or its local socket. */
 export function isNoBrowser(text: string): boolean {
   return /Browser extension is not connected|isn't paired with your browser|No Chrome extension connected/.test(text)

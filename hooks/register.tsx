@@ -30,8 +30,8 @@ import {
   identityFromProfile,
   identityFromStatus,
   isLoginOf,
-  isNoBrowser,
   isPolicyRefusal,
+  isUnansweredCall,
   isSpent,
   keychainItem,
   keychainUser,
@@ -1305,8 +1305,9 @@ export const register: Register = on => {
   // Claude Code's words for a browser call that found no browser send the person to /login, which here signs in the wrong account.
   on('tool.call', { tool: CHROME_TOOL }, async ($, e, next) => {
     const done = await next(e)
-    if (done.deny !== undefined) return done
-    const note = await onBrowserCall($, done.isError === true && isNoBrowser(done.text ?? '')).catch(async error => {
+    // The mod's own question to Claude in Chrome is answered where it asked.
+    if (done.deny !== undefined || isAskingChrome) return done
+    const note = await onBrowserCall($, isUnansweredCall(e.tool, done.text ?? '', done.isError === true)).catch(async error => {
       await debug($, `browser call handling failed: ${String(error)}`)
       return undefined
     })

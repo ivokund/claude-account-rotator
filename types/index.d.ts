@@ -2,7 +2,8 @@
 export type UsageWindow = { pct: number; resetsAt?: string }
 
 /** A login's usage as last read, `at` in epoch milliseconds. */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; at: number }
+/** `models`: a model family's own week, by its display name ("Fable"), inside the login's week. */
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; models?: Record<string, UsageWindow>; at: number }
 
 /** Whether a login can serve requests, or why not. */
 export type Health =
@@ -78,6 +79,8 @@ export type View = {
   holders: Record<string, Holder>
   /** The login this session sends its requests with. */
   activeId: string
+  /** This session only: the model its main loop asks for, as its last request named it. */
+  model?: string
   /**
    * Set after a switch until Claude Code is seen sending the new login's
    * sign-in: meanwhile the footer blinks its in-use mark, and the pane says

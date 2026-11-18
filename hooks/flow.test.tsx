@@ -19,9 +19,12 @@ type World = {
   keychain: Record<string, string>
   /** credentials file -> stored text, or null where it cannot be read */
   files: Record<string, string | null>
-  /** access token -> [5-hour %, week %, or null where the plan reports no weekly limit] */
-  /** Per token, the 5-hour and the week percent used; null for a window the plan does not report. */
-  usage: Record<string, [number | null, number | null]>
+  /** Per token, the 5-hour and the week percent used, null for a window the plan does not report; and when the week resets. */
+  usage: Record<string, [number | null, number | null, string?]>
+  /** Per token, its Fable week's percent, as the usage endpoint's `limits` lists it. */
+  fable?: Record<string, number>
+  /** The session's model, as `$.session.model()` answers it. */
+  model?: string
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -44,9 +47,9 @@ type World = {
   /**
    * Claude in Chrome, where the session has it: the slots of the accounts a
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
-   * connection was made as.
+   * connection was made as. `asText`: Claude Code words a call that finds no
+   * browser as an ordinary result, not an error.
    */
-  /** `asText`: Claude Code words a call that finds no browser as an ordinary result, not an error. */
   chrome?: { extensions: string[]; as?: string; asText?: boolean }
   /** The slot in use at each of the mod's calls to Claude in Chrome, the session having it or not. */
   chromeAsked: string[]
@@ -146,10 +149,19 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     }
     const usage = w.usage[token]
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
-    const [five, week] = usage
+    const [five, week, weekResetsAt = '2026-10-18T03:00:00Z'] = usage
+    const fable = w.fable?.[token]
     const body = {
       five_hour: five === null ? null : { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
-      seven_day: week === null ? null : { utilization: week, resets_at: '2026-10-18T03:00:00Z' },
+      seven_day: week === null ? null : { utilization: week, resets_at: weekResetsAt },
+      ...(fable === undefined
+        ? {}
+        : {
+            limits: [
+              { kind: 'weekly_all', percent: week, resets_at: weekResetsAt, scope: null },
+              { kind: 'weekly_scoped', percent: fable, resets_at: weekResetsAt, scope: { model: { id: null, display_name: 'Fable' }, surface: null } },
+            ],
+          }),
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
@@ -191,6 +203,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'session-1' }))
+  on('session.model', () => ({ value: w.model ?? 'claude-opus-5-5' }))
   on('tool.check', () => ({ decision: 'allow' as const }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: w.limits } }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
@@ -1837,4 +1850,86 @@ test('list_connected_browsers listing none counts as a dropped connection, and h
   expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
   // Once connected, a list with a browser in it is no drop.
   expect((await browse($, 'list_connected_browsers')).context).toBeUndefined()
+})
+
+// Fable has a week of its own inside the account's week: Fable use counts toward both, other models toward the week alone.
+
+/** Account 1, Claude Code's login, with 20% of its week left but its Fable week at 96%; account 2 has room in both. */
+async function fableWorld(on: Parameters<typeof world>[0], model: string): Promise<{ w: World; clock: MockClock; slot2: string }> {
+  const w = fresh()
+  const slot2 = `${HOME}/.claude/accounts/2`
+  w.model = model
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(slot2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 80, '2026-10-13T03:00:00Z']
+  w.usage['tok-2'] = [null, 10, '2026-10-18T03:00:00Z']
+  w.fable = { 'tok-1': 96, 'tok-2': 5 }
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: '1@example.com' }, { id: '2', slot: slot2, email: '2@example.com' }] })
+  return { w, clock, slot2 }
+}
+
+/** A model request of the main loop, or of a subagent, on `model`. */
+async function requestOn($: Engine, clock: MockClock, model: string, agentId?: string): Promise<void> {
+  const stream = $.turn.step({ turnId: 'turn-1', index: 0, model, messageCount: 1, ...(agentId === undefined ? {} : { agentId }) })
+  for await (const _ of stream) {
+    // The chunks say nothing here.
+  }
+  await stream.result
+  await clock.settle()
+}
+
+test('a Fable session moves once its account\'s Fable week reaches 95%, though its week has room', async ($, on) => {
+  const { w, clock, slot2 } = await fableWorld(on, 'claude-fable-5-2')
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: slot2 }])
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Switched to Claude account 2 .*: account 1 has 4% of its Fable week left\.$/.test(t))).toHaveLength(1)
+})
+
+test('an Opus session stays on an account whose Fable week is spent while its week has room', async ($, on) => {
+  const { w, clock } = await fableWorld(on, 'claude-opus-5-5')
+  await start($, clock)
+  await clock.advance(6 * 60_000)
+  expect(w.envSets).toEqual([])
+})
+
+test('a subagent on Fable leaves an Opus session be; a /model to Fable in the main loop moves it on', async ($, on) => {
+  const { w, clock, slot2 } = await fableWorld(on, 'claude-opus-5-5')
+  await start($, clock)
+  await requestOn($, clock, 'claude-fable-5-2', 'agent-1')
+  expect(w.envSets).toEqual([])
+  await requestOn($, clock, 'claude-fable-5-2')
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: slot2 }])
+})
+
+test('a response keeps the Fable week the usage check read, and the pane shows it under the week', async ($, on) => {
+  const w = fresh()
+  w.model = 'claude-fable-5-2'
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 40, '2026-10-13T03:00:00Z']
+  w.fable = { 'tok-1': 60 }
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }] })
+  await start($, clock)
+  w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: '2026-10-13T03:00:00Z' }]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  const pane = await mountPane($)
+  const row = (await pane.find({ key: 'account-1' }))?.text ?? ''
+  expect(row).toMatch(/week▰{6}▱{4} 59% left.*Fable▰{4}▱{6} 40% left/)
+  expect(await pane.find({ text: /or 5% of its Fable week, as this session uses Fable\) left/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a Fable session\'s footer shows each account\'s fuller week, and with every Fable week spent the band says so', async ($, on) => {
+  const { w, clock } = await fableWorld(on, 'claude-fable-5-2')
+  w.fable = { 'tok-1': 96, 'tok-2': 97 }
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  // Account 1's week has 20% left, its Fable week 4%: the footer shows 4%.
+  expect((await footer.find(GLYPHS))?.text).toMatch(/ 4% $/)
+  await footer.unmount()
+  const band = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+  expect((await band.find({ text: /^Every Claude account is near its/ }))?.text).toMatch(/^Every Claude account is near its Fable limit; the next frees up in /)
+  await band.unmount()
 })

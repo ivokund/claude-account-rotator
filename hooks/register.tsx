@@ -17,6 +17,7 @@ import {
   CHROME_TOOL,
   EMPTY_VIEW,
   LEAVE_FIVE_HOUR,
+  LEAVE_SEVEN_DAY,
   blockedText,
   browsersFrom,
   canConnectChrome,
@@ -36,6 +37,7 @@ import {
   keychainItem,
   keychainUser,
   label,
+  modelWindow,
   pickTarget,
   rotateToFrom,
   readingFromLimits,
@@ -47,6 +49,7 @@ import {
   slotEnv,
   spentReading,
   stuckText,
+  viewScope,
   windowPct,
 } from './model'
 import type { Credential, Identity } from './model'
@@ -490,7 +493,11 @@ function whyLeave(view: View, now: number): string {
   if (view.health[view.activeId]?.kind === 'login-needed') return `account ${view.activeId} needs a sign-in`
   const r = view.readings[view.activeId]
   const five = windowPct(r?.fiveHour, now) ?? 0
-  const [window, used] = five >= LEAVE_FIVE_HOUR ? ['5-hour window', five] : ['week', windowPct(r?.sevenDay, now) ?? 0]
+  const week = windowPct(r?.sevenDay, now) ?? 0
+  const scope = viewScope(view)
+  const model = windowPct(modelWindow(r, scope), now) ?? 0
+  const [window, used] =
+    five >= LEAVE_FIVE_HOUR ? ['5-hour window', five] : week < LEAVE_SEVEN_DAY && model >= LEAVE_SEVEN_DAY ? [`${scope} week`, model] : ['week', week]
   return view.footer.fill === 'left'
     ? `account ${view.activeId} has ${Math.round(100 - used)}% of its ${window} left`
     : `account ${view.activeId} has used ${Math.round(used)}% of its ${window}`
@@ -739,7 +746,9 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   if (view.pending !== undefined) return
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
-  await saveReading($, view.activeId, reading)
+  // A response reports the 5-hour window and the week, not a model's own week: the usage check's stays.
+  const models = view.readings[view.activeId]?.models
+  await saveReading($, view.activeId, models === undefined ? reading : { ...reading, models })
   await maybeRotate($)
 }
 
@@ -771,7 +780,7 @@ async function onStopFailure($: Host, error: string): Promise<void> {
     const after = await getView($)
     if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the window that limits the login as full.
-      await saveReading($, active.id, spentReading(after.readings[active.id], now))
+      await saveReading($, active.id, spentReading(after.readings[active.id], now, viewScope(after)))
     }
   }
   await setView($, v => ({ ...v, pending: undefined }))
@@ -887,7 +896,7 @@ function shouldConnectAtOpen(view: View, now: number): boolean {
   return (
     health !== 'login-needed' &&
     health !== 'logging-in' &&
-    !isSpent(view.readings[target.id], now) &&
+    !isSpent(view.readings[target.id], now, viewScope(view)) &&
     (answered.length === 0 || answered.includes(target.id))
   )
 }
@@ -1244,8 +1253,9 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   }
   const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
+  const model = await $.session.model().catch(() => undefined)
   await mergeStore($)
-  await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
+  await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }), ...(model === undefined ? {} : { model }) }))
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
   if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {
@@ -1283,6 +1293,11 @@ export const register: Register = on => {
   // Claude Code reads the sign-in again just before a request: the profile check is sure of a switch only after one.
   on('turn.step', async function* ($, e, next) {
     lastRequestAt = await $.clock.now()
+    // The main loop's model, after a /model too; a subagent's requests name their own.
+    if (e.agentId === undefined && e.model !== (await getView($)).model) {
+      await setView($, v => ({ ...v, model: e.model }))
+      void maybeRotate($).catch(error => debug($, `rotate failed: ${String(error)}`))
+    }
     return yield* next(e)
   })
 

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -101,6 +101,55 @@ test('a limit hit before the usage shows it fills the window that limits the log
   expect(spentReading({ sevenDay: { pct: 60, resetsAt: WEEK_END }, at: NOW - 1 }, NOW)).toEqual({ sevenDay: { pct: 100, resetsAt: WEEK_END }, at: NOW })
   // No reading yet: the 5-hour window, as before.
   expect(spentReading(undefined, NOW)).toEqual({ fiveHour: { pct: 100 }, at: NOW })
+})
+
+test('reads each model\'s own week from the usage body\'s limits, and which one a session\'s model falls under', () => {
+  const body = {
+    five_hour: null,
+    seven_day: { utilization: 80, resets_at: WEEK_END },
+    limits: [
+      { kind: 'weekly_all', group: 'weekly', percent: 80, resets_at: WEEK_END, scope: null },
+      { kind: 'weekly_scoped', group: 'weekly', percent: 100, resets_at: WEEK_END, scope: { model: { id: null, display_name: 'Fable' }, surface: null } },
+      // A limit on a surface, not a model, is not a model's week.
+      { kind: 'weekly_scoped', group: 'weekly', percent: 50, resets_at: WEEK_END, scope: { model: null, surface: 'cowork' } },
+    ],
+  }
+  const reading = readingFromUsage(body, NOW)
+  expect(reading).toEqual({ sevenDay: { pct: 80, resetsAt: WEEK_END }, models: { Fable: { pct: 100, resetsAt: WEEK_END } }, at: NOW })
+  const readings = { '1': reading ?? { at: NOW } }
+  expect(scopeOf('claude-fable-5-2', readings)).toBe('Fable')
+  expect(scopeOf('Fable 5.2', readings)).toBe('Fable')
+  expect(scopeOf('claude-opus-5-5', readings)).toBeUndefined()
+  expect(scopeOf(undefined, readings)).toBeUndefined()
+})
+
+test('a Fable session leaves at 95% of the Fable week and picks by the smaller room; an Opus session goes by the week alone', () => {
+  const v = view({ '1': [0, 80], '2': [0, 10], '3': [0, 30] })
+  const fable = (pct: number) => ({ Fable: { pct, resetsAt: WEEK_END } })
+  const readings: Record<string, Reading> = {
+    '1': { sevenDay: { pct: 80, resetsAt: WEEK_END }, models: fable(95), at: NOW },
+    '2': { sevenDay: { pct: 10, resetsAt: WEEK_END }, models: fable(94), at: NOW },
+    '3': { sevenDay: { pct: 30, resetsAt: WEEK_END }, models: fable(20), at: NOW },
+  }
+  const opus = { ...v, readings, model: 'claude-opus-5-5' }
+  const onFable = { ...opus, model: 'claude-fable-5-2' }
+  expect(shouldLeave(opus, NOW)).toBe(false)
+  expect(shouldLeave(onFable, NOW)).toBe(true)
+  // Account 2 has the most week left, but only 6% of its Fable week.
+  expect(pickTarget(onFable, NOW)?.id).toBe('3')
+  expect(pickTarget(opus, NOW)?.id).toBe('2')
+  expect(roomOf(readings['2'], NOW, 'Fable')).toBe(6)
+  expect(roomOf(readings['2'], NOW)).toBe(90)
+  // With a 5-hour window, the smaller of what it can serve now and the Fable week.
+  expect(roomOf({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 30, resetsAt: WEEK_END }, models: fable(70), at: NOW }, NOW, 'Fable')).toBe(30)
+})
+
+test('a turn on Fable that hits a limit fills the Fable week where it is the fuller window, else the window that limits the login', () => {
+  const r = { sevenDay: { pct: 80, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, at: NOW }
+  expect(spentReading(r, NOW, 'Fable')).toEqual({ sevenDay: { pct: 80, resetsAt: WEEK_END }, models: { Fable: { pct: 100, resetsAt: WEEK_END } }, at: NOW })
+  expect(spentReading(r, NOW)).toEqual({ sevenDay: { pct: 100, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, at: NOW })
+  const five = { fiveHour: { pct: 85, resetsAt: LATER }, sevenDay: { pct: 30, resetsAt: WEEK_END }, models: { Fable: { pct: 40, resetsAt: WEEK_END } }, at: NOW }
+  expect(spentReading(five, NOW, 'Fable')).toEqual({ ...five, fiveHour: { pct: 100, resetsAt: LATER } })
 })
 
 test('next in list moves to the login after the one in use, wrapping, past spent and locked ones', () => {

@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.4.0 - 2026-11-18
+
+- **The footer's in-use mark blinks, and the panel says switching, until a switch lands.** Claude Code goes on sending the old account's sign-in for up to 30 seconds after a switch, so claude.ai actions taken then, like publishing an artifact, still belonged to the old account while the footer already showed the new one in use. Now the footer's mark (the tile, the lines, or the bright column) blinks, and the panel says **switching** in place of **in use**, for at most 35 seconds: until the mod sees the session send the new account (it asks Anthropic whose sign-in the session holds), or, in a session with nothing going on, until Claude Code will read the new sign-in before its next request. The toast that says which account the session switched to shows then, not as the switch starts. If the first request after still goes out as the old account, the session goes back to it, as before.
+- **An account read before its window reset shows as unknown, not as fresh.** Such a reading said nothing of the usage since, but the footer drew it as 100% left: an account at 99% looked unused. Now its glyph shows `·`, and the panel says the window reset and wasn't read since.
+- **Far fewer usage checks.** Every session checked every account every 10 minutes, and Anthropic began rate limiting the checks, so readings went stale with no sign. Sessions now share readings: an account read in the last 5 minutes by any session isn't checked again. After a rate-limited check, every session waits 5 minutes, and the panel says so.
+
 ## 0.3.2 - 2026-11-10
 
 - **A window no longer opens on a spent account to connect Claude in Chrome.** Each window used to move to the account picked in the **Chrome** box for about 35 seconds as it opened, whatever usage that account had left, so a prompt sent then hit its limit. Now, while that account is out of usage, or while no browser answered as it last time but one did as another account, the window stays on its own account, and Claude in Chrome connects at the first browser call that finds no browser.

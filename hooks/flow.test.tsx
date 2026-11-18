@@ -287,7 +287,7 @@ test('a login with nothing in the keychain shows as needing a sign-in, with one 
       plugin: 'account-rotator',
       surface,
       component: 'AbovePrompt',
-      props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+      props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
     })
     expect(await band.find({ text: /account 2 \(two@example.com\) needs a sign-in \(not signed in\)/ })).toBeDefined()
     expect(await band.find({ key: 'sign-in-all' })).toBeDefined()
@@ -352,7 +352,7 @@ test('on Linux a login whose file is missing, holds no Claude login, cannot be r
     plugin: 'account-rotator',
     surface: 'terminal',
     component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
   })
   const names = /account 2 \(two@example.com\), 3 \(3@example.com\), 4 \(4@example.com\), 5 \(5@example.com\) needs a sign-in \(not signed in\)\./
   expect(await band.find({ text: names })).toBeDefined()
@@ -380,7 +380,7 @@ test('on Linux the band\'s Sign in reads the new login from the file the browser
     plugin: 'account-rotator',
     surface: 'terminal',
     component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
   })
   await band.press({ key: 'sign-in-all' })
   await clock.settle()
@@ -429,7 +429,7 @@ test('the band\'s Sign in signs a locked login in through the browser, in its ow
     plugin: 'account-rotator',
     surface: 'terminal',
     component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
   })
   await band.press({ key: 'sign-in-all' })
   await clock.settle()
@@ -1099,7 +1099,7 @@ test('a /login in a session on login 3 that signs in login 2\'s account leaves 3
   w.owners['tok-2b'] = 'two@example.com'
   await $.command.run(LOGIN)
   await clock.settle()
-  const band = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} } })
+  const band = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} } })
   expect(await band.find({ text: /account 3 \(three@example.com\) needs a sign-in \(signed in as account 2 now\)/ })).toBeDefined()
   await band.unmount()
   // The session moves off it, to the login the rotation picks: 2, with the most room.
@@ -1226,7 +1226,7 @@ test('a view kept from the code before a hot reload, which lacks what this code 
   await pane.unmount()
 })
 
-const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 160, scroll: { offset: 0, bodyRows: 9 }, view: {} } as const
+const BAND_PROPS = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 160, scroll: { offset: 0, bodyRows: 9 }, view: {} } as const
 
 /**
  * A call to one of Claude in Chrome's tools, as Claude makes one: its input
@@ -1787,7 +1787,7 @@ test('a sign-in Claude Code ends with no result, as it does after Cancel, ends a
     plugin: 'account-rotator',
     surface: 'terminal',
     component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
   })
   await band.press({ key: 'sign-in-all' })
   await clock.settle()

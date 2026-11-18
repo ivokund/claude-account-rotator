@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.4.1 - 2026-11-18
+
+- **Cancel during a browser sign-in now ends it cleanly.** Pressing **Cancel** while a **Sign in** or **+ Add an account** waited on the browser showed "Something went wrong: TypeError…", and the account stayed at "signing in…" with **Cancel** still up. Now the usual "Sign-in for Claude account N did not finish." toast shows, and the account offers **Sign in** again. Thanks to @andrest (#3).
+
 ## 0.4.0 - 2026-11-18
 
 - **The footer's in-use mark blinks, and the panel says switching, until a switch lands.** Claude Code goes on sending the old account's sign-in for up to 30 seconds after a switch, so claude.ai actions taken then, like publishing an artifact, still belonged to the old account while the footer already showed the new one in use. Now the footer's mark (the tile, the lines, or the bright column) blinks, and the panel says **switching** in place of **in use**, for at most 35 seconds: until the mod sees the session send the new account (it asks Anthropic whose sign-in the session holds), or, in a session with nothing going on, until Claude Code will read the new sign-in before its next request. The toast that says which account the session switched to shows then, not as the switch starts. If the first request after still goes out as the old account, the session goes back to it, as before.

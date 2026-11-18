@@ -6,6 +6,7 @@ import type {
   ProcessSpawnChunk,
   ProcessSpawnResult,
   Register,
+  SessionAuthorization,
   SessionRateLimit,
   Timer,
 } from 'claude-code'
@@ -60,6 +61,15 @@ const PANE_COLUMNS = 64
 const SETTLE_MS = 35_000
 /** A switch no response has shown after this long is reported as not taken. */
 const CONFIRM_GIVE_UP_MS = 4 * 60_000
+/** A beat of the in-use mark's blink while a switch is not yet seen to land: lit one beat, unlit the next. */
+const BLINK_MS = 500
+/** How often a switch asks who the session's sign-in is, for its first CONFIRM_POLL_FOR_MS; the minute's timer asks after. */
+const CONFIRM_POLL_MS = 5_000
+const CONFIRM_POLL_FOR_MS = SETTLE_MS + 15_000
+/** A reading this fresh, from any session, is not asked for again by the routine check: every session asking every login piles up. */
+const USAGE_FRESH_MS = 5 * 60_000
+/** After Anthropic rate limits a usage check, how long every session leaves the usage endpoint be. */
+const USAGE_PAUSE_MS = 5 * 60_000
 /**
  * Claude Code refreshes a token 5 minutes before it expires. A refresh that
  * runs while the old login's read is still cached is saved under the new
@@ -76,6 +86,8 @@ const CONTINUE =
   'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in. Continue where you left off.'
 
 const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY_VIEW)
+/** Whether a pending switch's in-use mark is drawn this beat: only the footer reads it, and only while a switch is pending. */
+const blinkAtom = atom({ plugin: 'account-rotator', key: 'blink' } as const, true)
 
 /**
  * Whether this session's pane shows. A press opens or closes it in its own
@@ -95,6 +107,17 @@ let held: { target: Account; why: string; timer: Timer } | undefined
 const untaken = new Set<string>()
 /** When this session last moved to another login: until SETTLE_MS after, its requests may still go out as the one before. */
 let movedAt: number | undefined
+/** The timer that blinks a pending switch's mark and asks whether it has landed: one at a time. */
+let watch: Timer | undefined
+/** A check whether the pending switch has landed is under way: another waits for its turn rather than ask twice. */
+let isSettling = false
+/**
+ * When this session last sent a model request. Claude Code reads a sign-in
+ * again only before a request (or a claude.ai call), once its 30 s read has
+ * run out: until a request goes out SETTLE_MS after a switch, the sign-in it
+ * holds, which the profile check sees, may still be the one before.
+ */
+let lastRequestAt: number | undefined
 /** Connect is under way: the rotation waits for it, and browser calls are held back. */
 let isConnectingChrome = false
 
@@ -168,6 +191,8 @@ async function mergeStore($: Host): Promise<void> {
   const chromeAccountId = typeof chrome === 'string' && accounts.some(a => a.id === chrome) ? chrome : undefined
   const seen = await $.store.get('chrome-accounts')
   const chromeAccountIds = (Array.isArray(seen) ? seen : []).filter((id): id is string => typeof id === 'string' && accounts.some(a => a.id === id))
+  const paused = await $.store.get('usage-paused-until')
+  const usagePausedUntil = typeof paused === 'number' ? paused : undefined
   await setView($, v => {
     const nextReadings: Record<string, Reading> = {}
     const nextHealth: Record<string, Health> = {}
@@ -183,7 +208,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, chromeAccountId, chromeAccountIds, usagePausedUntil }
   })
 }
 
@@ -247,11 +272,8 @@ async function readCredentialsFile($: Host, slot: string): Promise<Stored> {
 
 type UsageAnswer = { kind: 'ok'; body: unknown } | { kind: 'rejected' } | { kind: 'failed'; status: number }
 
-const oauthHeaders = (accessToken: string) => ({
-  Authorization: `Bearer ${accessToken}`,
-  'anthropic-beta': 'oauth-2025-04-20',
-  'Content-Type': 'application/json',
-})
+const OAUTH_BETA = { 'anthropic-beta': 'oauth-2025-04-20', 'Content-Type': 'application/json' }
+const oauthHeaders = (accessToken: string) => ({ Authorization: `Bearer ${accessToken}`, ...OAUTH_BETA })
 
 /** The usage of the login a token belongs to, as `/usage` reads it. */
 async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
@@ -266,9 +288,14 @@ async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
   }
 }
 
-/** Who a token signs in, as Claude Code asks at a sign-in: email, organization and plan; undefined when the call fails. */
-async function fetchIdentity($: Host, accessToken: string): Promise<Identity | undefined> {
-  const res = await $.http.fetch(PROFILE_URL, { headers: oauthHeaders(accessToken) })
+/**
+ * Who a sign-in belongs to, as Claude Code asks at a sign-in: email and
+ * organization; undefined when the call fails. A login's, by its token, or the
+ * session's own, by the handle `$.session.authorize()` answered.
+ */
+async function fetchIdentity($: Host, by: { token: string } | { auth: string }): Promise<Identity | undefined> {
+  const init = 'token' in by ? { headers: oauthHeaders(by.token) } : { auth: by.auth, headers: OAUTH_BETA }
+  const res = await $.http.fetch(PROFILE_URL, init)
   if (!res.ok) return undefined
   try {
     return identityFromProfile(JSON.parse(res.text))
@@ -339,7 +366,7 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   const known = (await getView($)).holders[account.id]
   if (known?.token === token) return known
   if (!isLive) return undefined
-  const who = await fetchIdentity($, credential.accessToken)
+  const who = await fetchIdentity($, { token: credential.accessToken })
   if (who?.email === undefined) return undefined
   const holder = { token, who: { ...who, email: who.email, ...(credential.plan === undefined ? {} : { plan: credential.plan }) } }
   await saveHolder($, account.id, holder)
@@ -376,11 +403,33 @@ async function followSignIn($: Host, account: Account, who: Identity): Promise<A
 }
 
 /**
- * Re-reads one login's stored sign-in: who it belongs to and, while its token
- * is live, its usage. One that is another login's on the list leaves this
- * login needing its own, its usage that other's.
+ * Whether to ask the usage endpoint about a login now: not while Anthropic
+ * rate limits the checks, and, unless it is urgent, not while a reading of it
+ * any session took is fresh: that one comes in with the store.
  */
-async function checkAccount($: Host, account: Account): Promise<void> {
+async function shouldAskUsage($: Host, id: string, now: number, isUrgent: boolean): Promise<boolean> {
+  const paused = await $.store.get('usage-paused-until')
+  if (typeof paused === 'number' && paused > now) return false
+  if (isUrgent) return true
+  const stored = await $.store.get(`reading:${id}`)
+  const at = typeof stored === 'object' && stored !== null ? (stored as Partial<Reading>).at : undefined
+  return typeof at !== 'number' || now - at >= USAGE_FRESH_MS
+}
+
+/** Anthropic rate limited a usage check: every session leaves the usage endpoint be for a while, and the pane says so. */
+async function pauseUsage($: Host, now: number): Promise<void> {
+  const until = now + USAGE_PAUSE_MS
+  await $.store.set('usage-paused-until', until)
+  await setView($, v => ({ ...v, usagePausedUntil: until }))
+}
+
+/**
+ * Re-reads one login's stored sign-in: who it belongs to and, while its token
+ * is live, its usage, unless a fresh reading is in hand and the check is not
+ * urgent. One that is another login's on the list leaves this login needing
+ * its own, its usage that other's.
+ */
+async function checkAccount($: Host, account: Account, isUrgent = false): Promise<void> {
   const now = await $.clock.now()
   if (signingIn === account.id) return
   const stored = await readStored($, account.slot)
@@ -395,10 +444,13 @@ async function checkAccount($: Host, account: Account): Promise<void> {
     const holder = await holderOf($, account, credential, isLive)
     const twin = holder === undefined ? undefined : await followSignIn($, account, holder.who)
     if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as account ${twin.id} now` }
-    else if (isLive) {
+    else if (isLive && (await shouldAskUsage($, account.id, now, isUrgent))) {
       const usage = await fetchUsage($, credential.accessToken)
       if (usage.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
-      if (usage.kind === 'failed') await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
+      if (usage.kind === 'failed') {
+        await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
+        if (usage.status === 429) await pauseUsage($, now)
+      }
       if (usage.kind === 'ok') {
         const reading = readingFromUsage(usage.body, now)
         if (reading !== undefined) await saveReading($, account.id, reading)
@@ -469,7 +521,11 @@ async function refreshingSoon($: Host, view: View, target: Account, now: number)
   return isSoon ? active : undefined
 }
 
-/** Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast. */
+/**
+ * Points this session at `target`; false while the refresh guard holds it
+ * back, or Claude Code's policy refuses it. A toast says so once the switch is
+ * seen to land; a quiet one has none.
+ */
 async function switchTo($: Host, target: Account, why: string, isQuiet = false): Promise<boolean> {
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
@@ -495,65 +551,181 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false):
   }
   const now = await $.clock.now()
   movedAt = now
+  await update($, blinkAtom, () => true)
   await setView($, v => ({
     ...v,
     activeId: target.id,
-    pending: { id: target.id, from: v.activeId, since: now },
+    pending: { id: target.id, from: v.activeId, since: now, ...(isQuiet ? {} : { why }) },
     removing: undefined,
   }))
-  if (!isQuiet) $.ui.toast(`Switched to Claude account ${label(target)}: ${why}.`, { timeoutMs: 6000 })
+  watchSwitch($, now)
   return true
 }
 
 /**
- * After a switch: which login answered the latest response? The new one
- * (confirmed), or too soon to say. Only a response still answered by the old
- * login minutes later is reported: an idle session has no new response to tell.
- * Then the session is pointed back at the old login, and the footer and pane
- * mark it in use again, as it is the one spending.
+ * While the switch made at `since` is pending: blinks the in-use mark, and
+ * every CONFIRM_POLL_MS for a while asks whether it has landed. Stops once
+ * nothing is pending, whatever cleared it, or another switch takes over.
+ */
+function watchSwitch($: Host, since: number): void {
+  watch?.cancel()
+  let beats = 0
+  const beatsPerAsk = Math.round(CONFIRM_POLL_MS / BLINK_MS)
+  const timer = $.clock.every(BLINK_MS, () => {
+    void (async () => {
+      const { pending } = await getView($)
+      if (pending?.since !== since || pending.isDue === true) {
+        timer.cancel()
+        if (watch === timer) watch = undefined
+        return
+      }
+      beats += 1
+      await update($, blinkAtom, isLit => !isLit)
+      if (beats % beatsPerAsk === 0 && (await $.clock.now()) - since <= CONFIRM_POLL_FOR_MS) await settleOnce($, false)
+    })().catch(error => debug($, `switch watch failed: ${String(error)}`))
+  })
+  watch = timer
+}
+
+/**
+ * Which login the session's requests go out as now: whom the sign-in Claude
+ * Code holds belongs to, asked of the profile endpoint with that sign-in.
+ * Claude Code rereads a sign-in at most every 30 s, so just after a switch
+ * this is the login left. 'other' for an account not on the list; undefined
+ * where it can't tell: no sign-in lent to plugins, or the call failed.
+ */
+async function liveAccount($: Host): Promise<Account | 'other' | undefined> {
+  let auth: SessionAuthorization
+  try {
+    auth = await $.session.authorize()
+  } catch (error) {
+    await debug($, `the session's sign-in is not lent: ${String(error)}`)
+    return undefined
+  }
+  if (auth === null || auth.kind !== 'bearer') return undefined
+  const who = await fetchIdentity($, { auth: auth.handle }).catch(async error => {
+    await debug($, `asking whom the session's sign-in belongs to failed: ${String(error)}`)
+    return undefined
+  })
+  if (who === undefined) return undefined
+  return (await getView($)).accounts.find(a => isLoginOf(a, who)) ?? 'other'
+}
+
+/** One check at a time whether the pending switch has landed: a check asked for meanwhile is dropped, as the one under way answers it. */
+async function settleOnce($: Host, isResponse: boolean): Promise<void> {
+  if (isSettling) return
+  isSettling = true
+  try {
+    await settlePending($, isResponse)
+  } finally {
+    isSettling = false
+  }
+}
+
+/**
+ * After a switch: which login is the session's sign-in now? The new one
+ * confirms the switch. Claude Code reads it again only before a request, so
+ * the old one says the switch did not take only once a request went out
+ * SETTLE_MS after it, and minutes have passed. With none yet, the next request
+ * will read the new one: SETTLE_MS on, the switch shows as made (due), and the
+ * first request after confirms it. Where the session's sign-in can't be asked
+ * about, the latest response's usage tells, once SETTLE_MS has passed; then
+ * only a response still answered by the old login minutes later is reported.
  */
 async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const { pending, accounts } = await getView($)
   if (pending === undefined) return
+  const live = await liveAccount($)
   const now = await $.clock.now()
+  const isLate = now - pending.since > CONFIRM_GIVE_UP_MS
+  if (live !== undefined) {
+    const hasRequested = lastRequestAt !== undefined && lastRequestAt >= pending.since + SETTLE_MS
+    if (live !== 'other' && live.id === pending.id) await confirmPending($, pending)
+    else if (hasRequested && isLate) await giveUpPending($, pending, live !== 'other' && live.id === pending.from ? live : undefined)
+    else if (now - pending.since >= SETTLE_MS) await dueFor($, pending)
+    return
+  }
   if (now - pending.since < SETTLE_MS) return
   const reading = readingFromLimits((await $.session.usage()).rateLimits, now)
   const target = accounts.find(a => a.id === pending.id)
-  if (target !== undefined) await checkAccount($, target)
+  if (target !== undefined) await checkAccount($, target, true)
   if (sameUsage(reading, (await getView($)).readings[pending.id], now)) {
-    untaken.delete(pending.id)
-    await setView($, v => ({ ...v, pending: undefined }))
-  } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
+    await confirmPending($, pending)
+  } else if (isResponse && isLate) {
     const from = accounts.find(a => a.id === pending.from)
-    if (from !== undefined) await checkAccount($, from)
-    if (from === undefined || !sameUsage(reading, (await getView($)).readings[from.id], now)) {
-      await setView($, v => ({ ...v, pending: undefined }))
-      tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
-      return
-    }
-    untaken.add(pending.id)
-    try {
-      await useSlot($, from.slot)
-      movedAt = now
-    } catch (error) {
-      await debug($, `switch back failed: ${String(error)}`)
-    }
-    await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
-    tell(
-      $,
-      `The switch to Claude account ${pending.id} did not take: responses still use account ${label(from)}, so it shows in use again. ` +
-        `The rotation leaves account ${pending.id} be in this session; Use now tries it again.`,
-    )
+    if (from !== undefined) await checkAccount($, from, true)
+    const isFrom = from !== undefined && sameUsage(reading, (await getView($)).readings[from.id], now)
+    await giveUpPending($, pending, isFrom ? from : undefined)
+  } else await dueFor($, pending)
+}
+
+type Pending = NonNullable<View['pending']>
+
+/** Whether `pending` is still the switch the session waits on: another may have taken its place meanwhile. */
+const isStill = (v: View, pending: Pending) => v.pending?.id === pending.id && v.pending.since === pending.since
+
+/** Says, unless the switch was quiet or it was said already, that the session switched. */
+function toastSwitched($: Host, view: View, pending: Pending): void {
+  if (pending.why === undefined) return
+  const target = view.accounts.find(a => a.id === pending.id)
+  $.ui.toast(`Switched to Claude account ${target === undefined ? pending.id : label(target)}: ${pending.why}.`, { timeoutMs: 6000 })
+}
+
+/** The switch has landed: the account switched to shows in use, steady, and a toast says so, unless it was quiet or said already. */
+async function confirmPending($: Host, pending: Pending): Promise<void> {
+  untaken.delete(pending.id)
+  const view = await getView($)
+  if (!isStill(view, pending)) return
+  await setView($, v => (isStill(v, pending) ? { ...v, pending: undefined } : v))
+  toastSwitched($, view, view.pending ?? pending)
+}
+
+/**
+ * SETTLE_MS on, with no request to show the switch since: Claude Code reads
+ * the new sign-in before the next one, so the switch shows as made, and is
+ * told; the first request after confirms it, or finds it did not take.
+ */
+async function dueFor($: Host, pending: Pending): Promise<void> {
+  const view = await getView($)
+  const current = view.pending
+  if (current === undefined || !isStill(view, pending) || current.isDue === true) return
+  await setView($, v => (v.pending !== undefined && isStill(v, pending) ? { ...v, pending: { ...v.pending, isDue: true, why: undefined } } : v))
+  toastSwitched($, view, current)
+}
+
+/**
+ * The switch did not take, minutes on. Still on `from`, the login left, the
+ * session is pointed back at it, and it shows in use again, as it is the one
+ * spending; the rotation leaves the other be. On neither, it says so.
+ */
+async function giveUpPending($: Host, pending: Pending, from: Account | undefined): Promise<void> {
+  if (!isStill(await getView($), pending)) return
+  if (from === undefined) {
+    await setView($, v => (isStill(v, pending) ? { ...v, pending: undefined } : v))
+    tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
+    return
   }
+  untaken.add(pending.id)
+  try {
+    await useSlot($, from.slot)
+    movedAt = await $.clock.now()
+  } catch (error) {
+    await debug($, `switch back failed: ${String(error)}`)
+  }
+  await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
+  tell(
+    $,
+    `The switch to Claude account ${pending.id} did not take: responses still use account ${label(from)}, so it shows in use again. ` +
+      `The rotation leaves account ${pending.id} be in this session; Use now tries it again.`,
+  )
 }
 
 /** A response's own usage: the active login's, unless a switch is still settling. */
 async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<void> {
+  if ((await getView($)).pending !== undefined) await settleOnce($, true)
+  // Still unsettled, the response may be either login's.
   const view = await getView($)
-  if (view.pending !== undefined) {
-    await settlePending($, true)
-    return
-  }
+  if (view.pending !== undefined) return
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
   await saveReading($, view.activeId, reading)
@@ -571,8 +743,8 @@ async function onStopFailure($: Host, error: string): Promise<void> {
     // Claude Code rereads a sign-in at most every 30 s: so soon after a switch, the turn may have gone out
     // as the login the session left. The usage endpoint says which one is spent or locked; neither is presumed.
     const from = view.accounts.find(a => a.id === pending.from)
-    if (from !== undefined) await checkAccount($, from)
-    await checkAccount($, active)
+    if (from !== undefined) await checkAccount($, from, true)
+    await checkAccount($, active, true)
     if (!shouldLeave(await getView($), await $.clock.now())) {
       if (isConnectingChrome) isCutByVisit = true
       // Once the switch lands, as a turn the switch itself cut short would.
@@ -583,7 +755,7 @@ async function onStopFailure($: Host, error: string): Promise<void> {
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
   } else {
-    await checkAccount($, active)
+    await checkAccount($, active, true)
     const now = await $.clock.now()
     const after = await getView($)
     if (!shouldLeave(after, now)) {
@@ -912,7 +1084,7 @@ async function adoptSignIn($: Host, account: Account): Promise<void> {
   await saveAccounts($, updated)
   await saveHealth($, account.id, { kind: 'ok' })
   const fresh = updated.find(a => a.id === account.id) ?? account
-  await checkAccount($, fresh)
+  await checkAccount($, fresh, true)
   await maybeRotate($)
 }
 
@@ -979,6 +1151,16 @@ async function removeAccount($: Host, id: string): Promise<void> {
 
 // ---------------------------------------------------------------- wiring
 
+/**
+ * Whether the footer's in-use mark is drawn now: always, but in the off beats
+ * of a pending switch's blink. The beat is read only while one is pending, so
+ * only then does each beat draw the footer again. Where no watch blinks it,
+ * as after a hot reload, which stops timers, the mark stays lit.
+ */
+async function markLit($: Host, view: View): Promise<boolean> {
+  return view.pending === undefined || view.pending.isDue === true || watch === undefined || (await read($, blinkAtom))
+}
+
 /** The footer's one press: opens the pane, or closes it while it shows. */
 function togglePane($: Host): Promise<unknown> {
   isPaneShown = !isPaneShown
@@ -989,7 +1171,7 @@ function togglePane($: Host): Promise<unknown> {
 async function checkActive($: Host): Promise<void> {
   const view = await getView($)
   const active = view.accounts.find(a => a.id === view.activeId)
-  if (active !== undefined) await checkAccount($, active)
+  if (active !== undefined) await checkAccount($, active, true)
   await maybeRotate($)
 }
 
@@ -1077,7 +1259,7 @@ export const register: Register = on => {
     })
     $.clock.every(60_000, () => {
       void mergeStore($)
-        .then(() => settlePending($, false))
+        .then(() => settleOnce($, false))
         .then(() => maybeRotate($))
         .catch(error => debug($, `sync failed: ${String(error)}`))
     })
@@ -1085,6 +1267,12 @@ export const register: Register = on => {
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
     })
     return started
+  })
+
+  // Claude Code reads the sign-in again just before a request: the profile check is sure of a switch only after one.
+  on('turn.step', async function* ($, e, next) {
+    lastRequestAt = await $.clock.now()
+    return yield* next(e)
   })
 
   on('session.measure', async ($, e, next) => {
@@ -1133,7 +1321,8 @@ export const register: Register = on => {
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const view = await getView($)
     if (view.accounts.length === 0) return next(e)
-    return Footer($.ui.resolve(e), view, e.props.modes, await $.clock.now(), actions($))
+    const isMarkLit = await markLit($, view)
+    return Footer($.ui.resolve(e), view, e.props.modes, await $.clock.now(), actions($), isMarkLit)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

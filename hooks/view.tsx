@@ -10,6 +10,7 @@ import {
   blockedAdvice,
   canConnectChrome,
   glyph,
+  hasReset,
   isSeatPlan,
   longBar,
   nextReset,
@@ -101,16 +102,16 @@ function activeRoom(view: View, now: number, row: 0 | 1): number | undefined {
 /**
  * The cell before column `i`, or after the last one at `i` = the number of
  * accounts: a space between columns, nothing at the ends, unless the highlight
- * draws there. The lines stand mid-cell either side of the column in use, half
+ * draws there. The lines stand mid-cell either side of the marked column, half
  * a cell clear of its glyphs. The tile pads it with half of each of those
  * cells, in half blocks, which most terminals draw to fill their cells; where
  * the terminal draws them from its font, short of the line, they would notch
  * the shade, so there it takes the whole cells.
  */
-function edge(view: View, i: number, inGaps: boolean): FooterRun[] {
+function edge(view: View, i: number, inGaps: boolean, markId: string | undefined): FooterRun[] {
   if (!inGaps) return i > 0 && i < view.accounts.length ? [{ text: ' ' }] : []
-  const active = view.accounts.findIndex(a => a.id === view.activeId)
-  if (i !== active && i - 1 !== active) return [{ text: ' ' }]
+  const active = view.accounts.findIndex(a => a.id === markId)
+  if (active === -1 || (i !== active && i - 1 !== active)) return [{ text: ' ' }]
   if (view.footer.active === 'lines') return [{ text: '│', ...LINE }]
   if (view.hasFontBlocks) return [{ text: ' ', backgroundColor: TILE }]
   return [{ text: i === active ? '▐' : '▌', color: TILE }]
@@ -118,23 +119,32 @@ function edge(view: View, i: number, inGaps: boolean): FooterRun[] {
 
 /**
  * One footer row as runs of text: a glyph per account, a space apart, then the
- * account in use's percent at the right end. While another row draws glyphs, a
- * row with its own off keeps their columns blank, so its percent lines up
- * under the other's.
+ * account in use's percent at the right end. The column `markId` names is
+ * marked in use: none in the off beat of a switch not yet seen to land. While
+ * another row draws glyphs, a row with its own off keeps their columns blank,
+ * so its percent lines up under the other's.
  */
-function footerRow(view: View, now: number, row: 0 | 1, style: Glyphs, showPercent: boolean, hasColumns: boolean): FooterRun[] {
+function footerRow(
+  view: View,
+  now: number,
+  row: 0 | 1,
+  style: Glyphs,
+  showPercent: boolean,
+  hasColumns: boolean,
+  markId: string | undefined,
+): FooterRun[] {
   const pct = activeRoom(view, now, row)
   const inGaps = hasColumns && IN_GAPS.includes(view.footer.active)
   const columns = hasColumns
     ? [
         ...view.accounts.flatMap((a, i) => [
-          ...edge(view, i, inGaps),
+          ...edge(view, i, inGaps, markId),
           {
             ...(style === 'none' ? { text: ' ' } : glyphOf(view, a, style, row, rooms(view, a, i, now)[row])),
-            ...marked(view.footer.active, a.id === view.activeId),
+            ...marked(view.footer.active, a.id === markId),
           },
         ]),
-        ...edge(view, view.accounts.length, inGaps),
+        ...edge(view, view.accounts.length, inGaps, markId),
       ]
     : []
   // A cell of the hover shade left of the glyphs where no highlight keeps one before the first column.
@@ -185,19 +195,24 @@ const ROW_NAMES = ['Session:', 'Weekly:'] as const
  * off, as one control that opens the pane, or closes it while it shows. Under
  * the pointer the glyphs light up on a shade, and each row's name shows at its
  * left. A week row with nothing to show is left out; with both rows off, a
- * word keeps the control.
+ * word keeps the control. Until a switch is seen to land, the in-use mark
+ * blinks: `isMarkLit` is false in its off beats.
  */
-export function Footer(ui: Ui, view: View, modes: readonly string[], now: number, act: Actions) {
+export function Footer(ui: Ui, view: View, modes: readonly string[], now: number, act: Actions, isMarkLit = true) {
   const { Box, Text, Button } = ui
   const { session, week, sessionPercent, weekPercent } = view.footer
-  const hasWeek = view.accounts.some((a, i) => rooms(view, a, i, now)[1] !== undefined)
+  const markId = isMarkLit ? view.activeId : undefined
+  // A week read before it reset still has a row, its glyphs unknown.
+  const hasWeek = view.accounts.some((a, i) => rooms(view, a, i, now)[1] !== undefined || view.readings[a.id]?.sevenDay !== undefined)
   const sessionGlyphs = session !== 'none'
   const weekGlyphs = week !== 'none' && hasWeek
   const hasColumns = sessionGlyphs || weekGlyphs
   const weekShown = weekGlyphs || (weekPercent && activeRoom(view, now, 1) !== undefined)
   const shownRows = [...(sessionGlyphs || sessionPercent ? [0 as const] : []), ...(weekShown ? [1 as const] : [])]
   const rows = shownRows.map(row =>
-    row === 0 ? footerRow(view, now, 0, session, sessionPercent, hasColumns) : footerRow(view, now, 1, week, weekPercent, hasColumns),
+    row === 0
+      ? footerRow(view, now, 0, session, sessionPercent, hasColumns, markId)
+      : footerRow(view, now, 1, week, weekPercent, hasColumns, markId),
   )
   return (
     <Box flexDirection="row" columnGap={1}>
@@ -524,7 +539,8 @@ const BAR_WIDTH = 20
 /**
  * One usage window of a login, filled and colored as the footer draws it, and
  * when it resets: beside it, or under the bar on a narrow pane. A plan that
- * reports no such window (a Team seat's week) says so.
+ * reports no such window (a Team seat's week) says so, as does one that has
+ * reset since its reading, which says nothing of what was used since.
  */
 function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReading: boolean, w: UsageWindow | undefined, now: number) {
   const { Box, Text } = ui
@@ -539,7 +555,7 @@ function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReadi
           {left === undefined ? (
             <Text dimColor>
               {longBar(undefined)}
-              {hasReading ? ' none reported' : ' no reading yet'}
+              {hasReset(w, now) ? ' reset, not read since' : hasReading ? ' none reported' : ' no reading yet'}
             </Text>
           ) : (
             <Text color={roomColor(left)}>{`${longBar(shown(fill, left))} ${shown(fill, left)}% ${fill === 'left' ? 'left' : 'used'}`}</Text>
@@ -556,8 +572,8 @@ const USE_WIDTH = '[ Use now ]'.length
 
 /**
  * The right end of a login's line: what it needs, then Remove, then rightmost
- * always its use, in a slot of its own: in use, Use now, Sign in while it
- * needs one, or signing in.
+ * always its use, in a slot of its own: in use, switching until a switch to it
+ * is seen to land, Use now, Sign in while it needs one, or signing in.
  */
 function lineEnd(ui: Ui, view: View, a: Account, act: Actions) {
   const { Box, Text, Button } = ui
@@ -592,7 +608,11 @@ function lineEnd(ui: Ui, view: View, a: Account, act: Actions) {
             view.chromeConnecting === a.id ? (
               <Text color="warning">◌ Connecting Chrome…</Text>
             ) : (
-              <Text color={ACCENT}>● in use</Text>
+              view.pending !== undefined && view.pending.isDue !== true ? (
+                <Text color="warning">◌ switching…</Text>
+              ) : (
+                <Text color={ACCENT}>● in use</Text>
+              )
             )
           ) : (
             health?.kind === 'ok' && <Button key={`use-${a.id}`} onPress={() => act.use(a.id)}>Use now</Button>
@@ -696,11 +716,20 @@ function LoginLine({ Text }: Ui, view: View) {
  * The pane: when the rotation moves on (or that it can't), and Claude Code's
  * own login, then every account, its usage and what can be done with it, then
  * Claude in Chrome in a session that has it, where the rotation moves to, and
- * the footer's settings, each group in its box.
+ * the footer's settings, each group in its box. While Anthropic rate limits
+ * usage checks, the accounts say their readings may be old.
  */
 export function Pane(ui: Ui, view: View, now: number, act: Actions) {
   const { Box, Text, Button } = ui
+  const paused = view.usagePausedUntil !== undefined && view.usagePausedUntil > now ? view.usagePausedUntil : undefined
   const accounts = [
+    ...(paused === undefined
+      ? []
+      : [
+          <Box key="usage-paused" marginBottom={1}>
+            <Text dimColor>{`Anthropic is rate limiting usage checks, so these may be a few minutes old. Checks resume ${untilText(paused, now)}.`}</Text>
+          </Box>,
+        ]),
     ...view.accounts.map(a => accountRows(ui, view, a, now, act)),
     <Box key="add-row" flexDirection="row" columnGap={2}>
       <Button key="add" onPress={act.add}>+ Add an account</Button>

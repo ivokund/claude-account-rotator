@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 
-import { DEFAULT_FOOTER, keychainItem, roomColor } from './model'
+import { DEFAULT_FOOTER, credentialFrom, keychainItem, roomColor } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const HOUR = 3600_000
@@ -50,6 +50,14 @@ type World = {
   chromeAsked: string[]
   /** The slash commands the mod ran, as typed. */
   commands: string[]
+  /** Claude Code lends plugins the session's sign-in (`$.session.authorize`); false as where it has none to lend. */
+  lendsSignIn?: boolean
+  /** Claude Code never reads the sign-in again after a switch, so the switch never takes. */
+  isCacheStuck?: boolean
+  /** The usage endpoint answers 429, as Anthropic rate limits it. */
+  isUsageLimited?: boolean
+  /** The tokens the usage endpoint was asked about, in order. */
+  usageAsked: string[]
 }
 
 /** Claude Code's words for a browser call that found no browser, as a session moved off its login gets them. */
@@ -83,14 +91,24 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   mock.store(on, store)
   mock.env(on, { USER: 'tester', HOME, ...w.env })
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
+  // Claude Code reads a sign-in again only just before a request, once its 30 s read has run out:
+  // until then it holds the slot it read before, whatever slot the session is on.
+  let held = { slot, until: 0 }
   on('env.set', (_$, e) => {
     if (w.refuseEnv) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
     // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
     if ((e.value ?? '') === slot) return { value: {} }
+    held = { slot: held.slot, until: Math.max(held.until, clock.now() + 30_000) }
     slot = e.value ?? ''
     w.envSets.push(e)
     return { value: {} }
   })
+  on('turn.step', async function* (_$, e) {
+    if (clock.now() >= held.until && !w.isCacheStuck) held = { slot, until: clock.now() + 30_000 }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+  })
+  const heldSlot = () => held.slot
+  on('session.authorize', () => ({ value: w.lendsSignIn === false ? null : { handle: 'session-sign-in', kind: 'bearer' as const } }))
   on('process.run', (_$, e) => {
     const [cmd, sub, verb] = e.argv
     if (cmd === 'security') {
@@ -104,8 +122,10 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     }
     throw new Error(`unexpected command: ${e.argv.join(' ')}`)
   })
-  on('http.fetch', (_$, e) => {
-    const token = (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
+  on('http.fetch', async (_$, e) => {
+    // The session's own sign-in, by its handle: the token of the slot Claude Code holds now.
+    const own = e.init?.auth === 'session-sign-in' ? credentialFrom(w.keychain[await keychainItem(heldSlot())] ?? '')?.accessToken : undefined
+    const token = own ?? (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
     if (e.url === 'https://api.anthropic.com/api/oauth/profile') {
       const email = w.owners[token]
       if (email === undefined) return { value: { status: 404, ok: false, headers: {}, text: '' } }
@@ -115,6 +135,8 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
       }
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } }
     }
+    w.usageAsked.push(token)
+    if (w.isUsageLimited) return { value: { status: 429, ok: false, headers: {}, text: '' } }
     const usage = w.usage[token]
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week] = usage
@@ -201,6 +223,7 @@ const fresh = (system: World['system'] = 'macOS'): World => ({
   env: {},
   chromeAsked: [],
   commands: [],
+  usageAsked: [],
 })
 const TWO_LOGINS ={ accounts: [{ id: '1', slot: '', email: 'one@example.com' }, { id: '2', slot: SLOT2, email: 'two@example.com' }] }
 
@@ -224,6 +247,16 @@ const PANE_PROPS = {
   scroll: { offset: 0, bodyRows: 30 },
   view: {},
 } as const
+
+/** A model request, as a turn sends one: Claude Code reads the sign-in again first, once its last read has run out. */
+async function request($: Engine, clock: MockClock): Promise<void> {
+  const stream = $.turn.step({ turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // The chunks say nothing here.
+  }
+  await stream.result
+  await clock.settle()
+}
 
 async function start($: Engine, clock: MockClock): Promise<void> {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
@@ -500,12 +533,14 @@ test('a window that can\'t switch, on a seat that runs out while another login h
   expect(w.envSets).toEqual([])
 })
 
-test('a switch that does not take, its responses still the old login\'s minutes later, points the session back and marks the old login in use, and the rotation does not try it again', async ($, on) => {
+test('a switch that does not take, Claude Code still sending the old login\'s sign-in minutes later, blinks meanwhile, then points the session back and marks the old login in use, and the rotation does not try it again', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [93, 40]
   w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  w.isCacheStuck = true
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -514,7 +549,15 @@ test('a switch that does not take, its responses still the old login\'s minutes 
     { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
     { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
   ]
-  await clock.advance(5 * 60_000)
+  // Minutes on, idle: no request has shown the switch, and the next would read the new sign-in, so login 2 shows in use.
+  await clock.advance(3 * 60_000)
+  const idle = await mountPane($)
+  expect(await idle.find({ type: 'Text', text: '● in use' })).toBeDefined()
+  await idle.unmount()
+  expect(w.toasts.filter(t => /did not take/.test(t))).toEqual([])
+  // A request goes out, and Claude Code still sends login 1's sign-in.
+  await clock.advance(2 * 60_000)
+  await request($, clock)
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
   expect(w.toasts.filter(t => /did not take: responses still use account 1/.test(t))).toHaveLength(1)
@@ -578,8 +621,9 @@ test('a turn that dies on the usage limit just after a switch, sent as the login
   expect(w.submitted[0]).toMatch(/Continue where you left off/)
 })
 
-test('a switch is confirmed once a response reports the new login usage, and an idle session is not told it failed', async ($, on) => {
+test('where Claude Code lends plugins no sign-in, a switch is confirmed once a response reports the new login usage, and an idle session is not told it failed', async ($, on) => {
   const w = fresh()
+  w.lendsSignIn = false
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [93, 40]
@@ -609,6 +653,124 @@ test('a switch is confirmed once a response reports the new login usage, and an 
   expect(await pane.find({ text: /^▰{7}▱{3} 70% left$/ })).toBeDefined()
   expect(w.toasts.filter(t => /has not shown/.test(t))).toEqual([])
   await pane.unmount()
+})
+
+test('after Use now the footer\'s in-use mark blinks and the pane says switching until Claude Code is seen sending the new account\'s sign-in, with no response needed; then the mark stays and the pane says in use', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, { ...TWO_LOGINS, footer: { ...DEFAULT_FOOTER, active: 'tile' } })
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  /** The session row's glyphs drawn on the tile, a beat on: the column marked in use. */
+  const tiled = async () => {
+    await clock.advance(500)
+    await footer.redraw()
+    return painted((await footer.find(GLYPHS))?.children[0]).filter(run => run.backgroundColor === 'subtle').length
+  }
+  // Claude Code still sends login 1's sign-in: login 2's tile comes and goes, its line in the pane says switching, and no toast says it switched.
+  const beats = [await tiled(), await tiled(), await tiled(), await tiled()]
+  expect(beats.sort()).toEqual([0, 0, 1, 1])
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toEqual([])
+  await pane.redraw()
+  expect(await pane.find({ type: 'Text', text: '◌ switching…' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '● in use' })).toBeUndefined()
+  // 35 s on, idle: Claude Code reads the new sign-in before its next request, so the tile stays on login 2, beat after beat, and a toast says so.
+  await clock.advance(33_000)
+  expect([await tiled(), await tiled(), await tiled()]).toEqual([1, 1, 1])
+  expect((await footer.find(GLYPHS))?.text).toBe(' ⣷▐⣷▌  90% \n ▆▐▆▌  70% ')
+  await pane.redraw()
+  expect(await pane.find({ type: 'Text', text: '● in use' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '◌ switching…' })).toBeUndefined()
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toEqual(['Switched to Claude account 2 (two@example.com · Org): you picked it.'])
+  // The next request goes out as login 2, which confirms the switch, told once; its responses are login 2's from now on.
+  await request($, clock)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: [{ kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' }], changed: ['rateLimits'] })
+  await clock.settle()
+  await footer.redraw()
+  expect((await footer.find(GLYPHS))?.text).toMatch(/ 70% \n/)
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+  await footer.unmount()
+  await pane.unmount()
+})
+
+test('a switch made while Claude is working lands with its next request 30 s on, and the mark stops blinking then', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await request($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  // Requests 10 s and 20 s on still go out as login 1: Claude Code read it under 30 s before.
+  await clock.advance(10_000)
+  await request($, clock)
+  await clock.advance(10_000)
+  await request($, clock)
+  await clock.advance(1_000)
+  await pane.redraw()
+  expect(await pane.find({ type: 'Text', text: '◌ switching…' })).toBeDefined()
+  // One 31 s on reads login 2's: the next check confirms it, before 35 s.
+  await clock.advance(10_000)
+  await request($, clock)
+  await clock.advance(4_000)
+  await pane.redraw()
+  expect(await pane.find({ type: 'Text', text: '● in use' })).toBeDefined()
+  expect(w.toasts.filter(t => /^Switched to Claude account 2/.test(t))).toHaveLength(1)
+  await pane.unmount()
+})
+
+test('a reading from before its window reset says nothing of the usage since: the footer draws it unknown, not empty, and the pane says it reset', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  // Login 2's token ran out, so it is not read now.
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [20, 30]
+  const old = { fiveHour: { pct: 97, resetsAt: '2026-10-12T09:00:00Z' }, sevenDay: { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 6 * HOUR }
+  const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': old })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.find(GLYPHS))?.text).toMatch(/^│⣷│· +80% \n│▆│▅ +70% $/)
+  await footer.unmount()
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/·{10} reset, not read since/)
+  await pane.unmount()
+})
+
+test('a usage check Anthropic rate limits pauses every session\'s checks for 5 minutes, and the pane says so; a reading another session took lately is not asked for again', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 24 * HOUR)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW + 24 * HOUR)
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  // Another session read login 2 a minute ago.
+  const lately = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000 }
+  const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': lately })
+  await start($, clock)
+  expect(w.usageAsked).toEqual(['tok-1'])
+  w.isUsageLimited = true
+  await clock.advance(10 * 60_000)
+  // Login 1's check is turned away, and login 2's is not asked at all.
+  expect(w.usageAsked).toEqual(['tok-1', 'tok-1'])
+  const pane = await mountPane($)
+  expect(await pane.find({ text: /^Anthropic is rate limiting usage checks, so these may be a few minutes old\. Checks resume in 5m\.$/ })).toBeDefined()
+  await pane.unmount()
+  w.isUsageLimited = false
+  await clock.advance(10 * 60_000)
+  expect(w.usageAsked).toEqual(['tok-1', 'tok-1', 'tok-1', 'tok-2'])
 })
 
 test('one press on the footer opens the accounts pane, the next closes it', async ($, on) => {
@@ -644,7 +806,7 @@ test('under the pointer the footer names its rows and lights its glyphs on a sha
   await footer.unmount()
 })
 
-test('Rotate now moves to the login with the most room; the one in use is marked in use at the right end, with no switching left on it', async ($, on) => {
+test('Rotate now moves to the login with the most room; it says switching at the right end until the move is seen to land, then in use', async ($, on) => {
   const w = fresh()
   const SLOT3 = '/Users/tester/.claude/accounts/3'
   w.keychain['Claude Code-credentials'] = blob('tok-1')
@@ -653,6 +815,7 @@ test('Rotate now moves to the login with the most room; the one in use is marked
   w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [60, 30]
   w.usage['tok-3'] = [40, 50]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com', 'tok-3': 'three@example.com' }
   const three = { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }] }
   const clock = world(on, w, three)
   await start($, clock)
@@ -660,6 +823,10 @@ test('Rotate now moves to the login with the most room; the one in use is marked
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT3 }])
+  await pane.redraw()
+  expect((await pane.find({ key: 'account-3' }))?.text).toMatch(/◌ switching…/)
+  expect(await pane.find({ type: 'Text', text: '● in use' })).toBeUndefined()
+  await clock.advance(35_000)
   await pane.redraw()
   expect((await pane.find({ type: 'Text', text: /^● in use$/ }))?.props).toMatchObject({ color: 'warning' })
   expect(await pane.find({ text: /switching/ })).toBeUndefined()
@@ -699,6 +866,7 @@ test('a switch held back for a token about to refresh is said once and made once
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
@@ -711,6 +879,8 @@ test('a switch held back for a token about to refresh is said once and made once
   w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
   await clock.advance(3 * 60_000)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  // Told once the switch lands.
+  await clock.advance(35_000)
   expect(w.toasts.filter(t => /Switched to Claude account 2/.test(t))).toHaveLength(1)
   await pane.unmount()
 })
@@ -862,6 +1032,7 @@ test('a /login in a session on login 3 that signs in login 2\'s account leaves 3
   await band.unmount()
   // The session moves off it, to the login the rotation picks: 2, with the most room.
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await clock.advance(35_000)
   expect(w.toasts.filter(t => /^Switched to Claude account 2 .*: account 3 needs a sign-in\.$/.test(t))).toHaveLength(1)
   // A later check, its token run out, keeps 3 needing a sign-in: the sign-in it holds is still 2's.
   w.keychain[await keychainItem(SLOT3)] = blob('tok-2b', NOW + 30 * 60_000)
@@ -1221,6 +1392,14 @@ test('as a session opens it visits the extension\'s account, which has room, to 
   expect(await visiting.find({ type: 'Text', text: '◌ Connecting Chrome…' })).toBeDefined()
   expect(await visiting.find({ type: 'Text', text: '● in use' })).toBeUndefined()
   await visiting.unmount()
+  // The footer's mark on login 2 blinks while the visit's sign-in is not yet seen in use.
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const lines = [(await footer.find(GLYPHS))?.text.split('\n')[0]]
+  await clock.advance(500)
+  await footer.redraw()
+  lines.push((await footer.find(GLYPHS))?.text.split('\n')[0])
+  expect(lines.sort()).toEqual([' ⣷ ⣦   60% ', ' ⣷│⣦│  60% '])
+  await footer.unmount()
   const held = await $.tool.check({ tool: 'mcp__claude-in-chrome__navigate', input: { url: 'https://example.com' } })
   expect(held.decision).toBe('deny')
   expect(held.reason).toMatch(/^The account-rotator mod is connecting Claude in Chrome as Claude account 2 \(two@example\.com\).* End your turn now/)

@@ -48,22 +48,32 @@ export function footerStyleFrom(value: unknown): FooterStyle {
   }
 }
 
-/** A window's percent now: 0 once its reset time has passed. */
+/** Whether a window's reset time has passed since it was read: what it has used since is unknown. */
+export function hasReset(w: UsageWindow | undefined, now: number): boolean {
+  return w?.resetsAt !== undefined && Date.parse(w.resetsAt) <= now
+}
+
+/**
+ * A window's percent now; undefined once its reset time has passed, as the
+ * reading says nothing of what was used since. The rotation counts that as
+ * empty (`?? 0`), as it does a window never read; the footer and pane show it
+ * as unknown.
+ */
 export function windowPct(w: UsageWindow | undefined, now: number): number | undefined {
-  if (w === undefined) return undefined
-  if (w.resetsAt !== undefined && Date.parse(w.resetsAt) <= now) return 0
+  if (w === undefined || hasReset(w, now)) return undefined
   return w.pct
 }
 
 /**
  * What a login can serve right now, percent of its 5-hour window: a week's
  * percent is a far bigger budget, so the session decides until the week is
- * spent, and then nothing is. Undefined before any 5-hour reading.
+ * spent, and then nothing is. Undefined before any 5-hour reading, and once
+ * the 5-hour window has reset since its reading, while the week has room.
  */
 export function availableNow(r: Reading | undefined, now: number): number | undefined {
-  const five = roomLeft(r?.fiveHour, now)
-  if (five === undefined) return undefined
-  return (windowPct(r?.sevenDay, now) ?? 0) >= LEAVE_SEVEN_DAY ? 0 : five
+  if (r?.fiveHour === undefined) return undefined
+  if ((windowPct(r.sevenDay, now) ?? 0) >= LEAVE_SEVEN_DAY) return 0
+  return roomLeft(r.fiveHour, now)
 }
 
 export function isSpent(r: Reading | undefined, now: number): boolean {

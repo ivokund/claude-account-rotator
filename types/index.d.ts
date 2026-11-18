@@ -78,8 +78,17 @@ export type View = {
   holders: Record<string, Holder>
   /** The login this session sends its requests with. */
   activeId: string
-  /** Set after a switch until a response shows the new login's usage. */
-  pending?: { id: string; from: string; since: number }
+  /**
+   * Set after a switch until Claude Code is seen sending the new login's
+   * sign-in: meanwhile the footer blinks its in-use mark, and the pane says
+   * switching. `why` the switch was made, told in a toast once it lands; none
+   * for a quiet one, as Claude in Chrome's visits are, or once told. `isDue`:
+   * SETTLE_MS on, with no request since to show it, so the next request reads
+   * the new sign-in: it shows switched, and the first request after confirms it.
+   */
+  pending?: { id: string; from: string; since: number; why?: string; isDue?: boolean }
+  /** Anthropic rate limited a usage check: no session asks again until then, epoch ms. */
+  usagePausedUntil?: number
   /** Account id whose removal waits for a second press. */
   removing?: string
   footer: FooterStyle
@@ -114,6 +123,7 @@ export type View = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'account-rotator': { view: View }
+    /** `blink`: whether a pending switch's in-use mark is drawn in this beat. */
+    'account-rotator': { view: View; blink: boolean }
   }
 }

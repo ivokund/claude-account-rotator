@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, keychainItem, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isSpent, keychainItem, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -51,7 +51,9 @@ test('ranks logins by what they can serve now: the 5-hour room, nothing once the
   expect(pickTarget(view({ '1': [95, 50], '2': [10, 80], '3': [50, 0] }), NOW)?.id).toBe('2')
   expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 80, resetsAt: WEEK_END }, at: NOW }, NOW)).toBe(90)
   expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 96, resetsAt: WEEK_END }, at: NOW }, NOW)).toBe(0)
-  expect(availableNow({ fiveHour: { pct: 97, resetsAt: LATER }, at: NOW }, Date.parse(LATER) + 1)).toBe(100)
+  // Reset since it was read: unknown, which the rotation counts as fresh.
+  expect(availableNow({ fiveHour: { pct: 97, resetsAt: LATER }, at: NOW }, Date.parse(LATER) + 1)).toBeUndefined()
+  expect(pickTarget(view({ '1': [95, 50], '2': [97, 10] }), NOW + 3 * 3600_000)?.id).toBe('2')
 })
 
 test('soonest reset moves to the login whose 5-hour window resets first, never a spent one; one with no window running comes last', () => {
@@ -89,9 +91,10 @@ test('a stored rotation choice is kept when known, else the soonest reset', () =
   expect(rotateToFrom(undefined)).toBe('reset')
 })
 
-test('a window counts as empty once its reset time has passed', () => {
-  expect(windowPct({ pct: 97, resetsAt: LATER }, Date.parse(LATER) + 1)).toBe(0)
+test('a window whose reset time has passed since its reading is unknown, and not spent', () => {
+  expect(windowPct({ pct: 97, resetsAt: LATER }, Date.parse(LATER) + 1)).toBeUndefined()
   expect(windowPct({ pct: 97, resetsAt: LATER }, NOW)).toBe(97)
+  expect(isSpent({ fiveHour: { pct: 97, resetsAt: LATER }, at: NOW }, Date.parse(LATER) + 1)).toBe(false)
 })
 
 test('reads the usage endpoint body as /usage serves it', () => {

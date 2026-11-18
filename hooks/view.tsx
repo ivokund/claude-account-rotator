@@ -6,6 +6,7 @@ import {
   LEAVE_FIVE_HOUR,
   LEAVE_SEVEN_DAY,
   SIGN_IN_WARN_MS,
+  agoText,
   availableNow,
   blockedAdvice,
   canConnectChrome,
@@ -544,6 +545,9 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   return undefined
 }
 
+/** A reading older than this (two of every session's checks) says how old it is in the pane. */
+const READING_OLD_MS = 20 * 60_000
+
 /** A window's name column: "5h", "week", or a model's own week ("Fable"), and a space. */
 const WINDOW_NAME_WIDTH = 6
 
@@ -676,6 +680,11 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
         .map(name => (
           <Box key={`model-${name}`}>{windowRow(ui, view.footer.fill, isActive, name, true, r?.models?.[name], now)}</Box>
         ))}
+      {r !== undefined && now - r.at > READING_OLD_MS && (
+        <Text key="read-at" dimColor>
+          {`   read ${agoText(r.at, now)}${view.idle?.includes(a.id) ? ', when a session last used it; read again once one does' : ''}`}
+        </Text>
+      )}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (
         <Text color="warning">   sign-in runs out {untilText(expiry, now)}; signing in again renews it</Text>
       )}

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
+import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -191,6 +191,13 @@ test('a new Fable session starts only where the Fable week has room too', () => 
   v.readings['2'] = { ...v.readings['2']!, sevenDay: { pct: 10, resetsAt: '2026-10-14T03:00:00Z' }, models: { Fable: { pct: 90, resetsAt: WEEK_END } } }
   expect(pickStart(v, NOW, {})?.id).toBe('2')
   expect(pickStart({ ...v, model: 'claude-fable-5-2' }, NOW, {})?.id).toBe('3')
+})
+
+test('says how long ago, in minutes, hours or days', () => {
+  expect(agoText(NOW - 40 * 60_000, NOW)).toBe('40m ago')
+  expect(agoText(NOW - 125 * 60_000, NOW)).toBe('2h 5m ago')
+  expect(agoText(NOW - 76 * 3600_000, NOW)).toBe('3d 4h ago')
+  expect(agoText(NOW + 60_000, NOW)).toBe('0m ago')
 })
 
 test('next in list moves to the login after the one in use, wrapping, past spent and locked ones', () => {

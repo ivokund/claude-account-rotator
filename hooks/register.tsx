@@ -490,8 +490,13 @@ async function checkAccount($: Host, account: Account, isUrgent = false): Promis
   }
   const credential = stored.state === 'present' ? stored.credential : undefined
   let health = healthOf(credential, now)
+  const isIdle = health.kind === 'ok' && credential !== undefined && credential.expiresAt <= now + 60_000
+  await setView($, v => {
+    const idle = (v.idle ?? []).filter(id => id !== account.id)
+    return { ...v, idle: isIdle ? [...idle, account.id] : idle }
+  })
   if (health.kind === 'ok' && credential !== undefined) {
-    const isLive = credential.expiresAt > now + 60_000
+    const isLive = !isIdle
     const holder = await holderOf($, account, credential, isLive)
     const twin = holder === undefined ? undefined : await followSignIn($, account, holder.who)
     if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as account ${twin.id} now` }

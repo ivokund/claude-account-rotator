@@ -88,6 +88,12 @@ export type View = {
   /** This session only: the model its main loop asks for, as its last request named it. */
   model?: string
   /**
+   * This session only: the logins whose token had run out at their last
+   * check. Only Claude Code renews a token, as a session sends a request, so
+   * no session has used such a login lately, and its usage isn't read until one does.
+   */
+  idle?: string[]
+  /**
    * Set after a switch until Claude Code is seen sending the new login's
    * sign-in: meanwhile the footer blinks its in-use mark, and the pane says
    * switching. `why` the switch was made, told in a toast once it lands; none

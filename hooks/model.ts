@@ -430,6 +430,15 @@ export function longBar(pct: number | undefined): string {
   return '▰'.repeat(full) + '▱'.repeat(10 - full)
 }
 
+/** "40m ago", "2h 5m ago": how long ago, relative as untilText is. */
+export function agoText(at: number, now: number): string {
+  const minutes = Math.max(0, Math.round((now - at) / 60_000))
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ${minutes % 60}m ago`
+  return `${Math.floor(hours / 24)}d ${hours % 24}h ago`
+}
+
 /** "in 1h 20m", "in 3d 4h": relative, so it needs no time zone. */
 export function untilText(at: number | string | undefined, now: number): string {
   if (at === undefined) return ''

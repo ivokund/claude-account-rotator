@@ -2057,3 +2057,32 @@ test('with a fresh 5-hour window picked, a session Claude Code won\'t let switch
   await clock.advance(36_000)
   expect(slots(w)).toEqual([])
 })
+
+test('the pane says how old a reading is once it is older than 20 minutes, and why it isn\'t read where no session has used the account lately', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  // Login 2's token ran out an hour ago: no session has used it since, and its usage isn't read until one does.
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [20, 30]
+  const old = { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 2 * HOUR }
+  const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': old })
+  await start($, clock)
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/read 2h 0m ago, when a session last used it; read again once one does$/)
+  expect((await pane.find({ key: 'account-1' }))?.text).not.toMatch(/read .* ago/)
+  await pane.unmount()
+})
+
+test('a reading Anthropic\'s rate limit keeps old says its age, with no word of an idle sign-in', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 24 * HOUR)
+  w.usage['tok-1'] = [20, 30]
+  w.isUsageLimited = true
+  const old = { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 25 * 60_000 }
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'reading:1': old })
+  await start($, clock)
+  const pane = await mountPane($)
+  expect(await pane.find({ text: /^Anthropic is rate limiting usage checks/ })).toBeDefined()
+  expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/read 25m ago$/)
+  await pane.unmount()
+})

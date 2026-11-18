@@ -40,6 +40,7 @@ import {
   rotateToFrom,
   readingFromLimits,
   readingFromUsage,
+  retryAfter,
   sameLogin,
   sameUsage,
   shouldLeave,
@@ -69,8 +70,10 @@ const CONFIRM_POLL_MS = 5_000
 const CONFIRM_POLL_FOR_MS = SETTLE_MS + 15_000
 /** A reading this fresh, from any session, is not asked for again by the routine check: every session asking every login piles up. */
 const USAGE_FRESH_MS = 5 * 60_000
-/** After Anthropic rate limits a usage check, how long every session leaves the usage endpoint be. */
+/** After Anthropic rate limits a usage check, how long every session leaves the usage endpoint be, at least. */
 const USAGE_PAUSE_MS = 5 * 60_000
+/** The longest a Retry-After holds every session's usage checks back: a wrong one would leave readings old for good. */
+const USAGE_PAUSE_MAX_MS = 60 * 60_000
 /**
  * Claude Code refreshes a token 5 minutes before it expires. A refresh that
  * runs while the old login's read is still cached is saved under the new
@@ -271,7 +274,7 @@ async function readCredentialsFile($: Host, slot: string): Promise<Stored> {
   return text === undefined ? { state: 'absent' } : { state: 'present', credential: credentialFrom(text) }
 }
 
-type UsageAnswer = { kind: 'ok'; body: unknown } | { kind: 'rejected' } | { kind: 'failed'; status: number }
+type UsageAnswer = { kind: 'ok'; body: unknown } | { kind: 'rejected' } | { kind: 'failed'; status: number; retryAfterMs?: number }
 
 const OAUTH_BETA = { 'anthropic-beta': 'oauth-2025-04-20', 'Content-Type': 'application/json' }
 const oauthHeaders = (accessToken: string) => ({ Authorization: `Bearer ${accessToken}`, ...OAUTH_BETA })
@@ -280,7 +283,10 @@ const oauthHeaders = (accessToken: string) => ({ Authorization: `Bearer ${access
 async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
   const res = await $.http.fetch(USAGE_URL, { headers: oauthHeaders(accessToken) })
   if (res.status === 401 || res.status === 403) return { kind: 'rejected' }
-  if (!res.ok) return { kind: 'failed', status: res.status }
+  if (!res.ok) {
+    const retryAfterMs = retryAfter(res.headers['retry-after'], await $.clock.now())
+    return { kind: 'failed', status: res.status, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) }
+  }
   try {
     return { kind: 'ok', body: JSON.parse(res.text) }
   } catch {
@@ -417,9 +423,13 @@ async function shouldAskUsage($: Host, id: string, now: number, isUrgent: boolea
   return typeof at !== 'number' || now - at >= USAGE_FRESH_MS
 }
 
-/** Anthropic rate limited a usage check: every session leaves the usage endpoint be for a while, and the pane says so. */
-async function pauseUsage($: Host, now: number): Promise<void> {
-  const until = now + USAGE_PAUSE_MS
+/**
+ * Anthropic rate limited a usage check: every session leaves the usage
+ * endpoint be for 5 minutes, or as long as its Retry-After asks, up to an
+ * hour, and the pane says so.
+ */
+async function pauseUsage($: Host, now: number, retryAfterMs?: number): Promise<void> {
+  const until = now + Math.max(USAGE_PAUSE_MS, Math.min(retryAfterMs ?? 0, USAGE_PAUSE_MAX_MS))
   await $.store.set('usage-paused-until', until)
   await setView($, v => ({ ...v, usagePausedUntil: until }))
 }
@@ -450,7 +460,7 @@ async function checkAccount($: Host, account: Account, isUrgent = false): Promis
       if (usage.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
       if (usage.kind === 'failed') {
         await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
-        if (usage.status === 429) await pauseUsage($, now)
+        if (usage.status === 429) await pauseUsage($, now, usage.retryAfterMs)
       }
       if (usage.kind === 'ok') {
         const reading = readingFromUsage(usage.body, now)

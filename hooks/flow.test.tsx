@@ -58,6 +58,8 @@ type World = {
   isCacheStuck?: boolean
   /** The usage endpoint answers 429, as Anthropic rate limits it. */
   isUsageLimited?: boolean
+  /** The Retry-After header a rate-limited usage check comes back with. */
+  retryAfter?: string
   /** The tokens the usage endpoint was asked about, in order. */
   usageAsked: string[]
 }
@@ -138,7 +140,10 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } }
     }
     w.usageAsked.push(token)
-    if (w.isUsageLimited) return { value: { status: 429, ok: false, headers: {}, text: '' } }
+    if (w.isUsageLimited) {
+      const headers: Record<string, string> = w.retryAfter === undefined ? {} : { 'retry-after': w.retryAfter }
+      return { value: { status: 429, ok: false, headers, text: '' } }
+    }
     const usage = w.usage[token]
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week] = usage
@@ -798,6 +803,46 @@ test('a usage check Anthropic rate limits pauses every session\'s checks for 5 m
   w.isUsageLimited = false
   await clock.advance(10 * 60_000)
   expect(w.usageAsked).toEqual(['tok-1', 'tok-1', 'tok-1', 'tok-2'])
+})
+
+test('a rate-limited usage check whose Retry-After asks for longer pauses every session that long, up to an hour', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 24 * HOUR)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW + 24 * HOUR)
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const lately = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000 }
+  const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': lately })
+  await start($, clock)
+  w.isUsageLimited = true
+  w.retryAfter = '1800'
+  await clock.advance(10 * 60_000)
+  expect(w.usageAsked).toEqual(['tok-1', 'tok-1'])
+  let pane = await mountPane($)
+  expect(await pane.find({ text: /Checks resume in 30m\.$/ })).toBeDefined()
+  await pane.unmount()
+  w.isUsageLimited = false
+  // Not asked again before the 30 minutes are up, where 5 would have let it.
+  await clock.advance(20 * 60_000)
+  expect(w.usageAsked).toEqual(['tok-1', 'tok-1'])
+  await clock.advance(15 * 60_000)
+  expect(w.usageAsked.length).toBeGreaterThan(2)
+  // A Retry-After of a day holds the checks back an hour at most.
+  w.isUsageLimited = true
+  w.retryAfter = '86400'
+  const asked = w.usageAsked.length
+  await clock.advance(10 * 60_000)
+  expect(w.usageAsked.length).toBe(asked + 1)
+  pane = await mountPane($)
+  const wait = /Checks resume in (\d+)m\./.exec((await pane.find({ text: /Checks resume in/ }))?.text ?? '')
+  expect(Number(wait?.[1])).toBeGreaterThan(30)
+  expect(Number(wait?.[1])).toBeLessThanOrEqual(60)
+  await pane.unmount()
+  w.isUsageLimited = false
+  await clock.advance(45 * 60_000)
+  expect(w.usageAsked.length).toBe(asked + 1)
+  await clock.advance(20 * 60_000)
+  expect(w.usageAsked.length).toBeGreaterThan(asked + 1)
 })
 
 test('one press on the footer opens the accounts pane, the next closes it', async ($, on) => {

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -245,6 +245,15 @@ test('a browser call found no browser when Claude Code says so as an error or as
   expect(isUnansweredCall('mcp__claude-in-chrome__list_connected_browsers', '[]', false)).toBe(true)
   expect(isUnansweredCall('mcp__claude-in-chrome__list_connected_browsers', '[{"deviceId":"d"}]', false)).toBe(false)
   expect(isUnansweredCall('mcp__claude-in-chrome__get_page_text', '[]', false)).toBe(false)
+})
+
+test('reads a Retry-After header as seconds or an HTTP date, from now', () => {
+  expect(retryAfter('120', NOW)).toBe(120_000)
+  expect(retryAfter(new Date(NOW + 30 * 60_000).toUTCString(), NOW)).toBe(30 * 60_000)
+  expect(retryAfter(new Date(NOW - 60_000).toUTCString(), NOW)).toBe(0)
+  expect(retryAfter('soon', NOW)).toBeUndefined()
+  expect(retryAfter('', NOW)).toBeUndefined()
+  expect(retryAfter(undefined, NOW)).toBeUndefined()
 })
 
 test('counts the browsers Claude in Chrome lists, and knows its words for none answering', () => {

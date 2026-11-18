@@ -166,6 +166,15 @@ function windowFrom(value: unknown): UsageWindow | undefined {
   return { pct: utilization, ...(typeof resets_at === 'string' ? { resetsAt: resets_at } : {}) }
 }
 
+/** A Retry-After header as milliseconds from now: seconds, or an HTTP date; undefined without one or past reading. */
+export function retryAfter(header: string | undefined, now: number): number | undefined {
+  if (header === undefined || header.trim() === '') return undefined
+  const seconds = Number(header)
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  const at = Date.parse(header)
+  return Number.isFinite(at) ? Math.max(0, at - now) : undefined
+}
+
 /** A reading from the body of GET /api/oauth/usage. */
 export function readingFromUsage(body: unknown, now: number): Reading | undefined {
   if (typeof body !== 'object' || body === null) return undefined

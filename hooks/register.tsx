@@ -52,8 +52,10 @@ import {
   startOnFrom,
   spentReading,
   stuckText,
+  usageReadAt,
   viewScope,
   windowPct,
+  withModelWeeks,
 } from './model'
 import type { Credential, Identity } from './model'
 import { Band, Footer, Pane } from './view'
@@ -162,8 +164,26 @@ async function saveAccounts($: Host, accounts: Account[]): Promise<void> {
 }
 
 async function saveReading($: Host, id: string, reading: Reading): Promise<void> {
+  const before = (await getView($)).readings[id]
   await $.store.set(`reading:${id}`, reading)
+  // What only the usage endpoint tells, kept beside the reading too: see storedReading.
+  if (reading.usageAt !== undefined && (before?.usageAt !== reading.usageAt || before.models !== reading.models)) {
+    await $.store.set(`usage:${id}`, { ...(reading.models === undefined ? {} : { models: reading.models }), usageAt: reading.usageAt })
+  }
   await setView($, v => ({ ...v, readings: { ...v.readings, [id]: reading } }))
+}
+
+/**
+ * A login's reading as the store has it, with the model weeks kept beside it:
+ * a session on an older version of the mod stores its readings without them,
+ * over the ones this version stored.
+ */
+async function storedReading($: Host, id: string): Promise<Reading | undefined> {
+  const r = await $.store.get(`reading:${id}`)
+  if (typeof r !== 'object' || r === null || typeof (r as Reading).at !== 'number') return undefined
+  const u = await $.store.get(`usage:${id}`)
+  const usage = typeof u === 'object' && u !== null && typeof (u as Reading).usageAt === 'number' ? (u as Pick<Reading, 'models' | 'usageAt'>) : undefined
+  return usage === undefined ? (r as Reading) : withModelWeeks(r as Reading, { ...usage, at: 0 })
 }
 
 /** Stores a login's health; answers what it was before. */
@@ -186,8 +206,8 @@ async function mergeStore($: Host): Promise<void> {
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
-    const r = await $.store.get(`reading:${a.id}`)
-    if (typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number') readings[a.id] = r as Reading
+    const r = await storedReading($, a.id)
+    if (r !== undefined) readings[a.id] = r
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -211,8 +231,9 @@ async function mergeStore($: Host): Promise<void> {
     for (const a of accounts) {
       const mine = v.readings[a.id]
       const theirs = readings[a.id]
-      const reading = mine !== undefined && (theirs === undefined || mine.at >= theirs.at) ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = reading
+      const isMine = mine !== undefined && (theirs === undefined || mine.at >= theirs.at)
+      const reading = isMine ? mine : theirs
+      if (reading !== undefined) nextReadings[a.id] = withModelWeeks(reading, isMine ? theirs : mine)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
@@ -452,15 +473,21 @@ async function followSignIn($: Host, account: Account, who: Identity): Promise<A
 /**
  * Whether to ask the usage endpoint about a login now: not while Anthropic
  * rate limits the checks, and, unless it is urgent, not while a reading of it
- * any session took is fresh: that one comes in with the store.
+ * any session took is fresh: that one comes in with the store. Where the login
+ * has a model's own week, only the usage endpoint's answer keeps it fresh: a
+ * session at work on the login reports its week with every response, and never
+ * that one.
  */
 async function shouldAskUsage($: Host, id: string, now: number, isUrgent: boolean): Promise<boolean> {
   const paused = await $.store.get('usage-paused-until')
   if (typeof paused === 'number' && paused > now) return false
   if (isUrgent) return true
-  const stored = await $.store.get(`reading:${id}`)
-  const at = typeof stored === 'object' && stored !== null ? (stored as Partial<Reading>).at : undefined
-  return typeof at !== 'number' || now - at >= USAGE_FRESH_MS
+  const theirs = await storedReading($, id)
+  const mine = (await getView($)).readings[id]
+  const isMine = mine !== undefined && (theirs === undefined || mine.at >= theirs.at)
+  const newest = isMine ? mine : theirs
+  const at = usageReadAt(newest === undefined ? undefined : withModelWeeks(newest, isMine ? theirs : mine))
+  return at === undefined || now - at >= USAGE_FRESH_MS
 }
 
 /**
@@ -509,7 +536,7 @@ async function checkAccount($: Host, account: Account, isUrgent = false): Promis
       }
       if (usage.kind === 'ok') {
         const reading = readingFromUsage(usage.body, now)
-        if (reading !== undefined) await saveReading($, account.id, reading)
+        if (reading !== undefined) await saveReading($, account.id, { ...reading, usageAt: now })
       }
     }
   }
@@ -789,8 +816,7 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
   // A response reports the 5-hour window and the week, not a model's own week: the usage check's stays.
-  const models = view.readings[view.activeId]?.models
-  await saveReading($, view.activeId, models === undefined ? reading : { ...reading, models })
+  await saveReading($, view.activeId, withModelWeeks(reading, view.readings[view.activeId]))
   await maybeRotate($)
 }
 
@@ -1205,6 +1231,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   if (view.chromeAccountId === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
+  await $.store.delete(`usage:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
   await setView($, v => {

@@ -107,6 +107,29 @@ export function viewScope(view: View): string | undefined {
   return scopeOf(view.model, view.readings)
 }
 
+/**
+ * A reading with the model weeks of whichever of it and `other` asked the
+ * usage endpoint last. A response's report has none, and neither has a reading
+ * a session on an older version of the mod stored: without this either would
+ * drop them.
+ */
+export function withModelWeeks(reading: Reading, other: Reading | undefined): Reading {
+  if (other?.usageAt === undefined || (reading.usageAt ?? -Infinity) >= other.usageAt) return reading
+  const { models: _dropped, ...rest } = reading
+  return { ...rest, ...(other.models === undefined ? {} : { models: other.models }), usageAt: other.usageAt }
+}
+
+/**
+ * When a reading last told all the usage endpoint tells, epoch ms: undefined
+ * before that endpoint answered for the login at all; where it reports a
+ * model's own week, when it last answered, as a response's report says nothing
+ * of that week; else when the reading was taken, a response's report serving.
+ */
+export function usageReadAt(r: Reading | undefined): number | undefined {
+  if (r?.usageAt === undefined) return undefined
+  return r.models === undefined ? r.at : r.usageAt
+}
+
 /** A login's week for one model family, by name. */
 export function modelWindow(r: Reading | undefined, scope: string | undefined): UsageWindow | undefined {
   return scope === undefined ? undefined : r?.models?.[scope]

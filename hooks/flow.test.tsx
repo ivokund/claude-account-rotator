@@ -802,7 +802,7 @@ test('a usage check Anthropic rate limits pauses every session\'s checks for 5 m
   w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [10, 30]
   // Another session read login 2 a minute ago.
-  const lately = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000 }
+  const lately = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, usageAt: NOW - 60_000, at: NOW - 60_000 }
   const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': lately })
   await start($, clock)
   expect(w.usageAsked).toEqual(['tok-1'])
@@ -824,7 +824,7 @@ test('a rate-limited usage check whose Retry-After asks for longer pauses every 
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW + 24 * HOUR)
   w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [10, 30]
-  const lately = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000 }
+  const lately = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, usageAt: NOW - 60_000, at: NOW - 60_000 }
   const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': lately })
   await start($, clock)
   w.isUsageLimited = true
@@ -1900,6 +1900,70 @@ test('a subagent on Fable leaves an Opus session be; a /model to Fable in the ma
   expect(w.envSets).toEqual([])
   await requestOn($, clock, 'claude-fable-5-2')
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: slot2 }])
+})
+
+test('a Fable session at work, its responses reporting the week all along, still has its Fable week read, and moves once that reaches 95%', async ($, on) => {
+  const { w, clock, slot2 } = await fableWorld(on, 'claude-fable-5-2')
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 24 * HOUR)
+  w.keychain[await keychainItem(slot2)] = blob('tok-2', NOW + 24 * HOUR)
+  w.fable = { 'tok-1': 60, 'tok-2': 5 }
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  // Responses report the 5-hour window and the week, never the Fable week: only the usage endpoint has that.
+  const work = async (minutes: number) => {
+    for (let i = 0; i < minutes; i += 2) {
+      await clock.advance(2 * 60_000)
+      w.limits = [{ kind: 'seven_day', percentUsed: 80 + i / 100, resetsAt: '2026-10-13T03:00:00Z' }]
+      await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+      await clock.settle()
+    }
+  }
+  await work(12)
+  expect(w.envSets).toEqual([])
+  w.fable = { 'tok-1': 96, 'tok-2': 5 }
+  await work(12)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: slot2 }])
+})
+
+test('a reading a window on an older version stored, without the Fable week, doesn\'t lose the one kept beside it: a Fable session still moves by it, with no new usage check', async ($, on) => {
+  const w = fresh()
+  w.model = 'claude-fable-5-2'
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 80, '2026-10-13T03:00:00Z']
+  w.usage['tok-2'] = [null, 10]
+  w.fable = { 'tok-1': 60, 'tok-2': 5 }
+  const clock = world(on, w, {
+    ...TWO_LOGINS,
+    // The older window's, a moment ago; beside it what the usage endpoint last told a window on this version.
+    'reading:1': { sevenDay: { pct: 80, resetsAt: '2026-10-13T03:00:00Z' }, at: NOW - 10_000 },
+    'usage:1': { models: { Fable: { pct: 96, resetsAt: '2026-10-13T03:00:00Z' } }, usageAt: NOW - 60_000 },
+  })
+  await start($, clock)
+  expect(w.usageAsked).toEqual(['tok-2'])
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+test('a window opening a minute after another asks the usage endpoint nothing: the other\'s answers, Fable weeks included, are in the store', async ($, on) => {
+  const { w, clock } = await fableWorld(on, 'claude-opus-5-5')
+  await start($, clock)
+  expect(w.usageAsked).toEqual(['tok-1', 'tok-2'])
+  await clock.advance(60_000)
+  await start($, clock)
+  expect(w.usageAsked).toEqual(['tok-1', 'tok-2'])
+})
+
+test('a reading from before the mod noted the usage endpoint\'s answers is asked for once, fresh as it is', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 24 * HOUR)
+  w.usage['tok-1'] = [20, 30]
+  w.fable = { 'tok-1': 40 }
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'reading:1': { sevenDay: { pct: 30 }, at: NOW - 10_000 } })
+  await start($, clock)
+  expect(w.usageAsked).toEqual(['tok-1'])
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/Fable▰{6}▱{4} 60% left/)
+  await pane.unmount()
 })
 
 test('a response keeps the Fable week the usage check read, and the pane shows it under the week', async ($, on) => {

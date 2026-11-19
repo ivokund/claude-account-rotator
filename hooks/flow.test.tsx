@@ -2215,6 +2215,30 @@ test('with a fresh 5-hour window picked, where Connect can\'t run as the window 
   expect(w.toasts).toContain("Switching to Claude account 3 in a few minutes, once account 1's token has refreshed.")
 })
 
+test('with a fresh 5-hour window picked, a new session whose login\'s token ran out overnight moves once its first request has refreshed it', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  // Claude Code refreshes a token that has run out at the session's first request, perhaps while its read of account 1
+  // is still cached: a move made before that could land account 1's new token on the account moved to.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW - HOUR)
+  const clock = world(on, w, { ...store, 'start-on': 'fresh' })
+  await start($, clock)
+  expect(slots(w)).toEqual([])
+  expect(w.toasts).toContain("Switching to Claude account 2 once account 1's token has refreshed, as this session's first request does.")
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([])
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+test('the rotation doesn\'t wait for a token that has run out: a session on a spent account whose token ran out moves at once', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [92, 40, LATER_WEEK], '2': [10, 10, SOON], '3': [50, 20, LATER_WEEK] })
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW - HOUR)
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+})
+
 test('with a fresh 5-hour window picked, a session that isn\'t interactive stays where it starts', async ($, on) => {
   const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
   const clock = world(on, w, { ...store, 'start-on': 'fresh' })

@@ -231,6 +231,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: w.limits } }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('classic.StopFailure', () => ({}))
+  on('classic.PostModelSwitch', () => ({}))
   on('ui.toast', (_$, e) => {
     w.toasts.push(e.text)
     return { value: undefined }
@@ -1922,6 +1923,25 @@ test('a subagent on Fable leaves an Opus session be; a /model to Fable in the ma
   await requestOn($, clock, 'claude-fable-5-2', 'agent-1')
   expect(w.envSets).toEqual([])
   await requestOn($, clock, 'claude-fable-5-2')
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: slot2 }])
+})
+
+test('a /model to Fable moves the session as it is made, before its next request, where the account\'s Fable week is spent', async ($, on) => {
+  const { w, clock, slot2 } = await fableWorld(on, 'claude-opus-5-5')
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  await $.classic.PostModelSwitch({
+    from_model: 'claude-opus-5-5',
+    to_model: 'claude-fable-5-2',
+    requested_model: 'fable',
+    source: 'command',
+    context_tokens: 0,
+    prompt_cache_warm: false,
+    cache_ttl: '5m',
+    estimated_cache_write_usd: 0,
+    pricing: 'default',
+  })
+  await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: slot2 }])
 })
 

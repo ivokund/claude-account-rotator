@@ -1343,6 +1343,13 @@ function actions($: Host): Actions {
   }
 }
 
+/** Notes the main loop's model; true where it changed, and the rotation should look again: the new one may have a week of its own. */
+async function noteModel($: Host, model: string): Promise<boolean> {
+  if (model === (await getView($)).model) return false
+  await setView($, v => ({ ...v, model }))
+  return true
+}
+
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
@@ -1421,13 +1428,18 @@ export const register: Register = on => {
   // Claude Code reads the sign-in again just before a request: the profile check is sure of a switch only after one.
   on('turn.step', async function* ($, e, next) {
     lastRequestAt = await $.clock.now()
-    // The main loop's model, after a /model too; a subagent's requests name their own.
-    if (e.agentId === undefined && e.model !== (await getView($)).model) {
-      await setView($, v => ({ ...v, model: e.model }))
+    // The main loop's model, where no /model told it; a subagent's requests name their own.
+    if (e.agentId === undefined && (await noteModel($, e.model))) {
       void maybeRotate($).catch(error => debug($, `rotate failed: ${String(error)}`))
     }
     return yield* next(e)
   })
+
+  // A /model, as it is made: where the new model's own week is spent on the account in use, the session moves before its next request.
+  on('classic.PostModelSwitch', async ($, e, next) => {
+    if (await noteModel($, e.to_model)) void maybeRotate($).catch(error => debug($, `rotate failed: ${String(error)}`))
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits')) {

@@ -81,12 +81,14 @@ export function windowPct(w: UsageWindow | undefined, now: number): number | und
 /**
  * What a login can serve right now, percent of its 5-hour window: a week's
  * percent is a far bigger budget, so the session decides until the week is
- * spent, and then nothing is. Undefined before any 5-hour reading, and once
- * the 5-hour window has reset since its reading, while the week has room.
+ * spent, and then nothing is; nor, for a session on a model with a week of
+ * its own, once that week is spent. Undefined before any 5-hour reading, and
+ * once the 5-hour window has reset since its reading, while the week has room.
  */
-export function availableNow(r: Reading | undefined, now: number): number | undefined {
+export function availableNow(r: Reading | undefined, now: number, scope?: string): number | undefined {
   if (r?.fiveHour === undefined) return undefined
   if ((windowPct(r.sevenDay, now) ?? 0) >= LEAVE_SEVEN_DAY) return 0
+  if ((windowPct(modelWindow(r, scope), now) ?? 0) >= LEAVE_SEVEN_DAY) return 0
   return roomLeft(r.fiveHour, now)
 }
 
@@ -171,7 +173,7 @@ export function limitingWindow(r: Reading | undefined): 'fiveHour' | 'sevenDay' 
  * the model week's room.
  */
 export function roomOf(r: Reading | undefined, now: number, scope?: string): number | undefined {
-  const room = limitingWindow(r) === 'sevenDay' ? roomLeft(r?.sevenDay, now) : availableNow(r, now)
+  const room = limitingWindow(r) === 'sevenDay' ? roomLeft(r?.sevenDay, now) : availableNow(r, now, scope)
   const model = roomLeft(modelWindow(r, scope), now)
   return model === undefined ? room : room === undefined ? model : Math.min(room, model)
 }

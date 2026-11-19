@@ -57,10 +57,11 @@ const DEMO: readonly (readonly [number, number])[] = [[85, 70], [60, 40], [35, 9
 function rooms(view: View, a: Account, i: number, now: number): readonly [number | undefined, number | undefined] {
   if (view.demo) return DEMO[i % DEMO.length] ?? [undefined, undefined]
   const r = view.readings[a.id]
-  // A session on a model with a week of its own (Fable) runs out at whichever week is fuller.
+  // A session on a model with a week of its own (Fable) runs out at whichever week is fuller, and has nothing to serve once either is spent.
+  const scope = viewScope(view)
   const week = roomLeft(r?.sevenDay, now)
-  const model = roomLeft(modelWindow(r, viewScope(view)), now)
-  return [availableNow(r, now), model === undefined ? week : week === undefined ? model : Math.min(week, model)]
+  const model = roomLeft(modelWindow(r, scope), now)
+  return [availableNow(r, now, scope), model === undefined ? week : week === undefined ? model : Math.min(week, model)]
 }
 
 /** A percent's room color, lighter while the pointer is over the footer. */

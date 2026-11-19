@@ -52,6 +52,10 @@ test('ranks logins by what they can serve now: the 5-hour room, nothing once the
   expect(pickTarget(view({ '1': [95, 50], '2': [10, 80], '3': [50, 0] }), NOW)?.id).toBe('2')
   expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 80, resetsAt: WEEK_END }, at: NOW }, NOW)).toBe(90)
   expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 96, resetsAt: WEEK_END }, at: NOW }, NOW)).toBe(0)
+  // Nor once the Fable week is spent, for a session on Fable; one on another model has the 5-hour room.
+  const fableSpent = { fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 50, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, at: NOW }
+  expect(availableNow(fableSpent, NOW, 'Fable')).toBe(0)
+  expect(availableNow(fableSpent, NOW)).toBe(90)
   // Reset since it was read: unknown, which the rotation counts as fresh.
   expect(availableNow({ fiveHour: { pct: 97, resetsAt: LATER }, at: NOW }, Date.parse(LATER) + 1)).toBeUndefined()
   expect(pickTarget(view({ '1': [95, 50], '2': [97, 10] }), NOW + 3 * 3600_000)?.id).toBe('2')

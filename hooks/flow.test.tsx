@@ -2047,6 +2047,23 @@ test('a Fable session\'s footer shows each account\'s fuller week, and with ever
   await band.unmount()
 })
 
+test('a Fable session\'s footer shows nothing to serve right now on an account whose Fable week is spent, as the rotation counts it', async ($, on) => {
+  const w = fresh()
+  w.model = 'claude-fable-5-2'
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [30, 50]
+  w.usage['tok-2'] = [20, 30]
+  w.fable = { 'tok-1': 96, 'tok-2': 97 }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  // Account 1 has 70% of its 5-hour window left, but its Fable week is spent: none right now, over the Fable week's 4%.
+  expect((await footer.find(GLYPHS))?.text).toMatch(/ 0% \n.* 4% $/)
+  await footer.unmount()
+})
+
 // Start on "a fresh 5-hour window": a new session on Claude Code's login moves to an account whose 5-hour window hasn't started.
 
 /** Three signed-in logins and their usage, read and checked before by another session too: [5-hour %, week %, week resets]. */

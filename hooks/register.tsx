@@ -394,10 +394,20 @@ async function signedInAs($: Host, slot: string): Promise<Identity | undefined> 
   return exitCode === 0 ? identityFromStatus(stdout) : undefined
 }
 
+/**
+ * A switch Claude Code itself held back: in a session that takes its settings
+ * from its organization, the write resolves with why, where the security
+ * default's refusal rejects. Either way the session can't switch.
+ */
+class SwitchHeld extends Error {}
+
+/** Whether a switch failed because Claude Code won't let this session switch, however it said so. */
+const isRefusal = (error: unknown): boolean => error instanceof SwitchHeld || isPolicyRefusal(error)
+
 /** Points this session's requests, and every child it starts after, at a slot's login. */
 async function useSlot($: Host, slot: string): Promise<void> {
-  if (slot === '') await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined)
-  else await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', slot)
+  const set = slot === '' ? await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined) : await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', slot)
+  if (set.deny !== undefined) throw new SwitchHeld(set.deny)
 }
 
 /**
@@ -423,7 +433,7 @@ async function checkSwitching($: Host, slot: string): Promise<void> {
   try {
     await useSlot($, slot)
   } catch (error) {
-    if (isPolicyRefusal(error)) await blocked($)
+    if (isRefusal(error)) await blocked($)
     else await debug($, `switch check failed: ${String(error)}`)
   }
 }
@@ -662,7 +672,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
   try {
     await useSlot($, target.slot)
   } catch (error) {
-    if (!isPolicyRefusal(error)) throw error
+    if (!isRefusal(error)) throw error
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
     if (!(await blocked($))) tell($, blockedText(await getView($)))
     return false

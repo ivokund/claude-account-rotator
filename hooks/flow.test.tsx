@@ -46,6 +46,8 @@ type World = {
   refuseEnv?: boolean
   /** A switch fails for a reason of its own, not the policy's. */
   envFails?: boolean
+  /** Claude Code itself holds every switch back, answering why, as in a session that takes its settings from its organization. */
+  holdsEnv?: boolean
   /**
    * Claude in Chrome, where the session has it: the slots of the accounts a
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
@@ -125,6 +127,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   let held = { slot, until: 0 }
   on('env.set', (_$, e) => {
     if (w.refuseEnv) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
+    if (w.holdsEnv) return { value: { deny: `${e.name} is held by this session's organization settings` } }
     // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
     if ((e.value ?? '') === slot) return { value: {} }
     if (w.envFails) return { deny: 'ENOSPC: no space left on device' }
@@ -540,6 +543,24 @@ test('where Claude Code\'s security policy refuses switching, as on a Team seat,
   await clock.settle()
   expect(w.toasts.filter(notice)).toHaveLength(2)
   expect(w.toasts.filter(t => /Something went wrong|Switched to/.test(t))).toEqual([])
+  await pane.unmount()
+})
+
+test('where Claude Code holds a switch back, answering why where the security policy would refuse, the session says so the same way and shows no switch', async ($, on) => {
+  const w = fresh()
+  w.holdsEnv = true
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [92, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Can't switch accounts in this session/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toEqual([])
+  const pane = await mountPane($)
+  expect(await pane.find({ text: /^Can't switch accounts in this session/ })).toBeDefined()
+  expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/in use/)
   await pane.unmount()
 })
 

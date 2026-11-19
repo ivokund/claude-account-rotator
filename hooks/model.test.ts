@@ -126,6 +126,13 @@ test('reads each model\'s own week from the usage body\'s limits, and which one 
   expect(scopeOf('Fable 5.2', readings)).toBe('Fable')
   expect(scopeOf('claude-opus-5-5', readings)).toBeUndefined()
   expect(scopeOf(undefined, readings)).toBeUndefined()
+  // By whole words: a week named with a version or the maker's name is still the model's; another version's is not.
+  const named = (...names: string[]) => ({ '1': { models: Object.fromEntries(names.map(name => [name, { pct: 10 }])), at: NOW } })
+  expect(scopeOf('claude-fable-5-2', named('Fable 5'))).toBe('Fable 5')
+  expect(scopeOf('claude-fable-5-2', named('Claude Fable'))).toBe('Claude Fable')
+  expect(scopeOf('claude-fable-5-2', named('Fable 4'))).toBeUndefined()
+  expect(scopeOf('claude-fabled-1', named('Fable'))).toBeUndefined()
+  expect(scopeOf('claude-fable-5-2', named('Fable', 'Fable 5'))).toBe('Fable 5')
 })
 
 test('a Fable session leaves at 95% of the Fable week and picks by the smaller room; an Opus session goes by the week alone', () => {

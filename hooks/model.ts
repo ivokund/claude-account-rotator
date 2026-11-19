@@ -92,16 +92,23 @@ export function availableNow(r: Reading | undefined, now: number, scope?: string
   return roomLeft(r.fiveHour, now)
 }
 
+/** A model's id or name as its words: runs of letters or digits, in lower case. */
+const wordsOf = (text: string): string[] => text.toLowerCase().match(/[a-z0-9]+/g) ?? []
+
 /**
  * Which of the logins' model weeks a model falls under, by name: `Fable` for
- * `claude-fable-5-2` or "Fable 5.2". Undefined for a model with no week of its
- * own (Opus, Sonnet), which only the login's week limits.
+ * `claude-fable-5-2` or "Fable 5.2". By whole words, every one of the week's
+ * name among the model's, so "Fable 5" or "Claude Fable" would be it too, and
+ * "Fable 4" not; of two that are, the one that says more. Undefined for a
+ * model with no week of its own (Opus, Sonnet), which only the login's week
+ * limits.
  */
 export function scopeOf(model: string | undefined, readings: Readonly<Record<string, Reading>>): string | undefined {
   if (model === undefined || model === '') return undefined
-  const m = model.toLowerCase()
-  const names = new Set(Object.values(readings).flatMap(r => Object.keys(r.models ?? {})))
-  return [...names].find(name => m.includes(name.toLowerCase()))
+  const words = new Set(wordsOf(model))
+  const names = [...new Set(Object.values(readings).flatMap(r => Object.keys(r.models ?? {})))]
+  const fits = names.filter(name => wordsOf(name).length > 0 && wordsOf(name).every(word => words.has(word)))
+  return fits.sort((a, b) => wordsOf(b).length - wordsOf(a).length || a.localeCompare(b))[0]
 }
 
 /** The model week this session's model falls under, if any. */

@@ -1332,6 +1332,103 @@ test('an account picked with Use now, low as it is, stays an idle session\'s unt
   await pane.unmount()
 })
 
+test('a pick made with Use now while the refresh guard holds a switch back is the switch made once it lifts: the rotation does not put its own in its place', async ($, on) => {
+  const { w, clock } = await threeKnown(on, [[93, 40], [10, 30], [20, 30]], world => (world.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 6 * 60_000)))
+  await start($, clock)
+  // Login 1 is spent, and its token refreshes within minutes: the rotation's switch to login 2 waits.
+  expect(w.toasts).toContain("Switching to Claude account 2 in a few minutes, once account 1's token has refreshed.")
+  expect(slots(w)).toEqual([])
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-3' })
+  await clock.settle()
+  await pane.unmount()
+  // Two minutes of the minute's checks, login 1 spent all along.
+  await clock.advance(2 * 60_000)
+  expect(slots(w)).toEqual([])
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([SLOT3])
+})
+
+test('Connect\'s quiet way back, held back for a token about to refresh, is quiet still once it is made', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  // Login 1, the extension's account, refreshes its token within minutes.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 6 * 60_000)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '1' })
+  await start($, clock)
+  // As it opens the session visits login 1 to connect; its way back to login 2 waits for login 1's token.
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([''])
+  expect(w.toasts).toContain("Switching to Claude account 2 in a few minutes, once account 1's token has refreshed.")
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual(['', SLOT2])
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Switched to/.test(t))).toEqual([])
+})
+
+/**
+ * Three logins, login 3 low, and a Chrome extension signed in to the account
+ * in `slot`; the session starts on login 1, connects Claude in Chrome as it
+ * opens (`opened`: the slots that took it through), and Use now then moves it
+ * to login 3, shown as made with no request.
+ */
+async function pickedLowThree(on: Parameters<typeof world>[0], $: Engine, chromeId: string, slot: string): Promise<{ w: World; clock: MockClock; opened: string[] }> {
+  const w = fresh()
+  w.chrome = { extensions: [slot] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.usage['tok-3'] = [95, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com', 'tok-3': 'three@example.com' }
+  const clock = world(on, w, { ...THREE_LOGINS, 'chrome-account': chromeId })
+  await start($, clock)
+  await clock.advance(72_000)
+  const opened = slots(w)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-3' })
+  await clock.settle()
+  await pane.unmount()
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([...opened, SLOT3])
+  return { w, clock, opened }
+}
+
+test('Connect\'s visit from an account picked with Use now goes back to it, low as it is, and it stays the session\'s until a request', async ($, on) => {
+  const { w, clock, opened } = await pickedLowThree(on, $, '1', '')
+  expect(opened).toEqual([])
+  // The connection has dropped: a browser call finds none, and Connect visits login 1, the extension's account.
+  if (w.chrome !== undefined) w.chrome.as = SLOT3
+  await browse($, 'navigate')
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT3, '', SLOT3])
+  await clock.advance(3 * 60_000)
+  expect(slots(w)).toEqual([SLOT3, '', SLOT3])
+})
+
+test('Connect on an account picked with Use now, the extension\'s own, leaves the pick the session\'s until a request, though a browser answers there', async ($, on) => {
+  const { w, clock, opened } = await pickedLowThree(on, $, '3', SLOT3)
+  // The connection is one made as login 1: a browser call finds none, and Connect makes it again as login 3, where the session is.
+  if (w.chrome !== undefined) w.chrome.as = ''
+  const commands = w.commands.length
+  await browse($, 'navigate')
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.commands.slice(commands)).toEqual(['/mcp reconnect claude-in-chrome'])
+  expect(slots(w)).toEqual([...opened, SLOT3])
+  await clock.advance(3 * 60_000)
+  expect(slots(w)).toEqual([...opened, SLOT3])
+})
+
 test('a reading from before its window reset says nothing of the usage since: the footer draws it unknown, not empty, and the pane says it reset', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')

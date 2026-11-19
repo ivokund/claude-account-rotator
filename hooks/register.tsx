@@ -119,7 +119,7 @@ let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
 /** A switch the refresh guard holds back: the latest one asked for, tried again each minute until it goes. */
-let held: { target: Account; why: string; isOpening: boolean; isPicked: boolean; timer: Timer } | undefined
+let held: { target: Account; why: string; options: SwitchOptions; timer: Timer } | undefined
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
 const untaken = new Set<string>()
 /** When this session last moved to another login: until SETTLE_MS after, its requests may still go out as the one before. */
@@ -327,6 +327,14 @@ async function noteChromeAccount($: Host, id: string, isSeen: boolean): Promise<
 // ---------------------------------------------------------------- host
 
 type Stored = { state: 'present'; credential: Credential | undefined } | { state: 'absent' } | { state: 'unreadable'; code: number }
+
+/**
+ * How a switch is made. `isQuiet`: no toast says so once it lands.
+ * `isOpening`: the move a new session starts with, which also waits for a
+ * token that has run out. `isPicked`: the person's own pick, which the
+ * rotation leaves be until a request confirms it.
+ */
+type SwitchOptions = { isQuiet?: boolean; isOpening?: boolean; isPicked?: boolean }
 
 /** A slot's stored login, from the keychain on macOS or its file elsewhere (Linux); the secret stays in this module. */
 async function readStored($: Host, slot: string): Promise<Stored> {
@@ -625,7 +633,8 @@ async function maybeRotate($: Host): Promise<boolean> {
     return false
   }
   const { pending } = view
-  const isWaiting = pending !== undefined && (pending.isPicked === true || isAwaited(pending))
+  // The person's pick, made or held back by the refresh guard, is not the rotation's to replace.
+  const isWaiting = held?.options.isPicked === true || (pending !== undefined && (pending.isPicked === true || isAwaited(pending)))
   if (isConnectingChrome || view.rotateTo === 'off' || isWaiting || !shouldLeave(view, now)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
@@ -655,19 +664,12 @@ async function refreshingSoon(
 }
 
 /**
- * How a switch is made. `isQuiet`: no toast says so once it lands.
- * `isOpening`: the move a new session starts with, which also waits for a
- * token that has run out. `isPicked`: the person's own pick, which the
- * rotation leaves be until a request confirms it.
- */
-type SwitchOptions = { isQuiet?: boolean; isOpening?: boolean; isPicked?: boolean }
-
-/**
  * Points this session at `target`; false while the refresh guard holds it
  * back, or Claude Code's policy refuses it. A toast says so once the switch is
  * seen to land; a quiet one has none.
  */
-async function switchTo($: Host, target: Account, why: string, { isQuiet = false, isOpening = false, isPicked = false }: SwitchOptions = {}): Promise<boolean> {
+async function switchTo($: Host, target: Account, why: string, options: SwitchOptions = {}): Promise<boolean> {
+  const { isQuiet = false, isOpening = false, isPicked = false } = options
   const turning = await refreshingSoon($, await getView($), target, await $.clock.now(), isOpening)
   if (turning !== undefined) {
     if (held === undefined) {
@@ -678,10 +680,10 @@ async function switchTo($: Host, target: Account, why: string, { isQuiet = false
           : `Switching to Claude account ${target.id} in a few minutes, once account ${turning.account.id}'s token has refreshed.`,
       )
       const retry = () => {
-        if (held !== undefined) void switchTo($, held.target, held.why, { isOpening: held.isOpening, isPicked: held.isPicked })
+        if (held !== undefined) void switchTo($, held.target, held.why, held.options)
       }
-      held = { target, why, isOpening, isPicked, timer: $.clock.every(60_000, retry) }
-    } else held = { ...held, target, why, isOpening, isPicked }
+      held = { target, why, options, timer: $.clock.every(60_000, retry) }
+    } else held = { ...held, target, why, options }
     return false
   }
   held?.timer.cancel()
@@ -1135,6 +1137,8 @@ async function connectingChrome(
   if (target === undefined || from === undefined || !canConnectChrome({ ...view, chromeAccountId: target.id })) return undefined
   // Tried for the extension: the account picked before stays its own until a browser answers as this one.
   const isTrial = target.id !== view.chromeAccountId
+  // The session sits on the person's pick, which no request has confirmed yet: a visit goes back to it as theirs.
+  const isPick = view.pending?.isPicked === true && view.pending.id === from.id
   const turning = await refreshingSoon($, view, target, await $.clock.now())
   if (turning !== undefined) {
     if (!isQuiet) tell($, `Chrome can connect as account ${target.id} once account ${turning.account.id}'s token has refreshed: try again in a few minutes.`)
@@ -1160,13 +1164,13 @@ async function connectingChrome(
   // Whether a browser answers as the extension's account: a trial that found none didn't ask there.
   if (!isTrial || answer === 'paired') hasChromeMissed = answer === 'unpaired'
   if (answer === 'paired') {
-    // A browser answering as the account shows the switch took: the rotation need not wait for a response to say so.
+    // A browser answering as the account shows the switch took: the rotation need not wait for a response to say so. The person's pick it leaves be until one all the same.
     untaken.delete(target.id)
-    await setView($, v => (v.pending?.id === target.id ? { ...v, pending: undefined } : v))
+    await setView($, v => (v.pending?.id === target.id && v.pending.isPicked !== true ? { ...v, pending: undefined } : v))
   }
   // Back to the login the session was on, or on to the one a new session starts on.
   const to = start ?? from
-  if (to.id !== target.id) await leaveVisit($, to, start === undefined ? undefined : await startReason($, start))
+  if (to.id !== target.id) await leaveVisit($, to, start === undefined ? undefined : await startReason($, start), start === undefined && isPick)
   // The visit is where the new session stays: said as any switch is, once made.
   else if (start !== undefined && isVisit) toastSwitched($, await getView($), { id: start.id, from: from.id, since: 0, why: await startReason($, start) })
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as Claude account ${label(target)}.`)
@@ -1183,17 +1187,18 @@ async function connectingChrome(
 
 /**
  * After Connect's visit: to `to`, the login the session was on or the one a
- * new session starts on, while it can serve, or with the rotation off; else on
- * to the one the rotation picks. The extension's account's usage is not the
- * session's to spend. Quietly back, or said, with `why`, for a new session.
+ * new session starts on, while it can serve, or with the rotation off, or as
+ * the person's pick (`isPick`), theirs still; else on to the one the rotation
+ * picks. The extension's account's usage is not the session's to spend.
+ * Quietly back, or said, with `why`, for a new session.
  */
-async function leaveVisit($: Host, to: Account, why?: string): Promise<void> {
+async function leaveVisit($: Host, to: Account, why?: string, isPick = false): Promise<void> {
   const now = await $.clock.now()
   const view = await getView($)
   const health = view.health[to.id]?.kind
   const canServe = health !== 'login-needed' && health !== 'logging-in' && !shouldLeave({ ...view, activeId: to.id }, now)
-  if (view.rotateTo === 'off' || canServe) {
-    await switchTo($, to, why ?? 'back from connecting Claude in Chrome', { isQuiet: why === undefined })
+  if (view.rotateTo === 'off' || canServe || isPick) {
+    await switchTo($, to, why ?? 'back from connecting Claude in Chrome', { isQuiet: why === undefined, isPicked: isPick })
     return
   }
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)

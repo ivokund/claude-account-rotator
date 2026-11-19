@@ -1389,7 +1389,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   // A window opening on Claude Code's login, with "a fresh 5-hour window" picked, may start elsewhere.
   const opened = await getView($)
   const isStarting = isInteractive && isOpening && slot === '' && opened.startOn === 'fresh' && opened.isSwitchBlocked !== true
-  // Where, goes by readings taken now, as far as the logins can be read: the store's may be old, and say nothing of a sign-in lost since.
+  // The pick goes by readings taken now, as far as the logins can be read: the store's may be old, and say nothing of a sign-in lost since.
   if (isStarting) await checkAccounts($)
   const start = isStarting
     ? await startPick($).catch(async error => {

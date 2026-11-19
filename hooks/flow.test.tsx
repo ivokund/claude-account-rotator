@@ -65,6 +65,12 @@ type World = {
   retryAfter?: string
   /** The tokens the usage endpoint was asked about, in order. */
   usageAsked: string[]
+  /**
+   * The store itself, where a test gives one: every session of the mod shares
+   * it, so the test reads what this session stored, and writes what another
+   * session would meanwhile.
+   */
+  shared?: Record<string, unknown>
 }
 
 /** Claude Code's words for a browser call that found no browser, as a session moved off its login gets them. */
@@ -95,7 +101,21 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
 /** Everything beneath the plugin: keychain or credentials files, `claude auth`, the usage API, the UI sinks. */
 function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   const clock = mock.clock(on, { now: NOW })
-  mock.store(on, store)
+  const { shared } = w
+  if (shared === undefined) mock.store(on, store)
+  else {
+    Object.assign(shared, structuredClone(store))
+    on('store.get', (_$, e) => ({ value: structuredClone(shared[e.key]) }))
+    on('store.set', (_$, e) => {
+      shared[e.key] = structuredClone(e.value)
+      return { value: undefined }
+    })
+    on('store.delete', (_$, e) => {
+      delete shared[e.key]
+      return { value: undefined }
+    })
+    on('store.keys', () => ({ value: Object.keys(shared) }))
+  }
   mock.env(on, { USER: 'tester', HOME, ...w.env })
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
   // Claude Code reads a sign-in again only just before a request, once its 30 s read has run out:
@@ -1923,6 +1943,35 @@ test('a Fable session at work, its responses reporting the week all along, still
   w.fable = { 'tok-1': 96, 'tok-2': 5 }
   await work(12)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: slot2 }])
+})
+
+test('a response\'s reading keeps the Fable week another window read since: saved with the week this window last saw, it would put the older one back', async ($, on) => {
+  const w = fresh()
+  w.model = 'claude-fable-5-2'
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 80, '2026-10-13T03:00:00Z']
+  w.usage['tok-2'] = [null, 10]
+  w.fable = { 'tok-1': 60, 'tok-2': 5 }
+  const shared: Record<string, unknown> = {}
+  w.shared = shared
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(shared['usage:1']).toMatchObject({ models: { Fable: { pct: 60 } }, usageAt: NOW })
+  // Another window's usage check, 20 seconds on, finds the Fable week at 96%.
+  await clock.advance(20_000)
+  const week = { pct: 80, resetsAt: '2026-10-13T03:00:00Z' }
+  const read = { models: { Fable: { pct: 96, resetsAt: '2026-10-13T03:00:00Z' } }, usageAt: NOW + 20_000 }
+  shared['usage:1'] = read
+  shared['reading:1'] = { sevenDay: week, ...read, at: NOW + 20_000 }
+  // This window's next response reports the week alone, before the minute's sync brought the other's reading in.
+  w.limits = [{ kind: 'seven_day', percentUsed: 80, resetsAt: '2026-10-13T03:00:00Z' }]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(shared['usage:1']).toEqual(read)
+  expect(shared['reading:1']).toMatchObject({ ...read, at: NOW + 20_000 })
+  // And the session goes by it at once.
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
 })
 
 test('a reading a window on an older version stored, without the Fable week, doesn\'t lose the one kept beside it: a Fable session still moves by it, with no new usage check', async ($, on) => {

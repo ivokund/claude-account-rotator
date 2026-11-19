@@ -39,6 +39,7 @@ import {
   keychainUser,
   label,
   modelWindow,
+  newestReading,
   pickStart,
   pickTarget,
   rotateToFrom,
@@ -163,27 +164,38 @@ async function saveAccounts($: Host, accounts: Account[]): Promise<void> {
   await setView($, v => ({ ...v, accounts }))
 }
 
-async function saveReading($: Host, id: string, reading: Reading): Promise<void> {
-  const before = (await getView($)).readings[id]
+/**
+ * What only the usage endpoint tells of a login, the model weeks and when it
+ * answered, as the store keeps them beside the reading: a session on an older
+ * version of the mod stores its readings without them, over this version's.
+ */
+async function storedUsage($: Host, id: string): Promise<Reading | undefined> {
+  const u = await $.store.get(`usage:${id}`)
+  if (typeof u !== 'object' || u === null || typeof (u as Reading).usageAt !== 'number') return undefined
+  const { models, usageAt } = u as Pick<Reading, 'models' | 'usageAt'>
+  return { ...(models === undefined ? {} : { models }), usageAt, at: 0 }
+}
+
+/**
+ * Stores a login's reading. Where another session asked the usage endpoint
+ * after this one did, the model weeks it stored stay: a response's report,
+ * saved with the weeks this session last saw, would put them back otherwise.
+ */
+async function saveReading($: Host, id: string, taken: Reading): Promise<void> {
+  const usage = await storedUsage($, id)
+  const reading = withModelWeeks(taken, usage)
   await $.store.set(`reading:${id}`, reading)
-  // What only the usage endpoint tells, kept beside the reading too: see storedReading.
-  if (reading.usageAt !== undefined && (before?.usageAt !== reading.usageAt || before.models !== reading.models)) {
+  if (reading.usageAt !== undefined && (usage?.usageAt === undefined || reading.usageAt > usage.usageAt)) {
     await $.store.set(`usage:${id}`, { ...(reading.models === undefined ? {} : { models: reading.models }), usageAt: reading.usageAt })
   }
   await setView($, v => ({ ...v, readings: { ...v.readings, [id]: reading } }))
 }
 
-/**
- * A login's reading as the store has it, with the model weeks kept beside it:
- * a session on an older version of the mod stores its readings without them,
- * over the ones this version stored.
- */
+/** A login's reading as the store has it, with the model weeks kept beside it. */
 async function storedReading($: Host, id: string): Promise<Reading | undefined> {
   const r = await $.store.get(`reading:${id}`)
   if (typeof r !== 'object' || r === null || typeof (r as Reading).at !== 'number') return undefined
-  const u = await $.store.get(`usage:${id}`)
-  const usage = typeof u === 'object' && u !== null && typeof (u as Reading).usageAt === 'number' ? (u as Pick<Reading, 'models' | 'usageAt'>) : undefined
-  return usage === undefined ? (r as Reading) : withModelWeeks(r as Reading, { ...usage, at: 0 })
+  return withModelWeeks(r as Reading, await storedUsage($, id))
 }
 
 /** Stores a login's health; answers what it was before. */
@@ -229,11 +241,8 @@ async function mergeStore($: Host): Promise<void> {
     const nextHealth: Record<string, Health> = {}
     const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
-      const mine = v.readings[a.id]
-      const theirs = readings[a.id]
-      const isMine = mine !== undefined && (theirs === undefined || mine.at >= theirs.at)
-      const reading = isMine ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = withModelWeeks(reading, isMine ? theirs : mine)
+      const reading = newestReading(v.readings[a.id], readings[a.id])
+      if (reading !== undefined) nextReadings[a.id] = reading
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
@@ -482,11 +491,7 @@ async function shouldAskUsage($: Host, id: string, now: number, isUrgent: boolea
   const paused = await $.store.get('usage-paused-until')
   if (typeof paused === 'number' && paused > now) return false
   if (isUrgent) return true
-  const theirs = await storedReading($, id)
-  const mine = (await getView($)).readings[id]
-  const isMine = mine !== undefined && (theirs === undefined || mine.at >= theirs.at)
-  const newest = isMine ? mine : theirs
-  const at = usageReadAt(newest === undefined ? undefined : withModelWeeks(newest, isMine ? theirs : mine))
+  const at = usageReadAt(newestReading((await getView($)).readings[id], await storedReading($, id)))
   return at === undefined || now - at >= USAGE_FRESH_MS
 }
 

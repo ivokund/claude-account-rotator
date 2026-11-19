@@ -119,6 +119,13 @@ export function withModelWeeks(reading: Reading, other: Reading | undefined): Re
   return { ...rest, ...(other.models === undefined ? {} : { models: other.models }), usageAt: other.usageAt }
 }
 
+/** The newer of two readings of a login, with the model weeks of whichever asked the usage endpoint last. */
+export function newestReading(mine: Reading | undefined, theirs: Reading | undefined): Reading | undefined {
+  const isMine = mine !== undefined && (theirs === undefined || mine.at >= theirs.at)
+  const newest = isMine ? mine : theirs
+  return newest === undefined ? undefined : withModelWeeks(newest, isMine ? theirs : mine)
+}
+
 /**
  * When a reading last told all the usage endpoint tells, epoch ms: undefined
  * before that endpoint answered for the login at all; where it reports a

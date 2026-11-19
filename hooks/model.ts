@@ -260,7 +260,6 @@ export function pickStart(view: View, now: number, claims: Readonly<Record<strin
     const claimed = claims[a.id]
     return (
       view.health[a.id]?.kind === 'ok' &&
-      !isSpent(r, now, scope) &&
       (windowPct(r?.fiveHour, now) ?? 0) === 0 &&
       weekLeft(r) >= START_WEEK_LEFT &&
       (claimed === undefined || now - claimed >= START_CLAIM_MS)
@@ -274,6 +273,21 @@ export function pickStart(view: View, now: number, claims: Readonly<Record<strin
   }
   const room = (a: Account) => weekLeft(view.readings[a.id])
   return fresh.sort((a, b) => (reset(a) === reset(b) ? room(b) - room(a) : reset(a) < reset(b) ? -1 : 1))[0]
+}
+
+/** A reading older than this (two of every session's checks) says how old it is: in the pane, and where a new session starts by it. */
+export const READING_OLD_MS = 20 * 60_000
+
+/**
+ * Why a new session moved to a login as it opened, as far as its reading
+ * tells. One not read lately says how long ago: the login may have been used
+ * since from somewhere the mod doesn't see.
+ */
+export function startWhy(r: Reading | undefined, now: number): string {
+  if (r === undefined) return 'it had no usage reading yet'
+  if (r.fiveHour === undefined) return 'its week resets soonest'
+  if (hasReset(r.fiveHour, now)) return `its 5-hour window had reset since it was read ${agoText(r.at, now)}`
+  return now - r.at > READING_OLD_MS ? `its 5-hour window hadn't started when read ${agoText(r.at, now)}` : "its 5-hour window hadn't started"
 }
 
 /**

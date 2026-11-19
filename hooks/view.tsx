@@ -6,6 +6,7 @@ import {
   LEAVE_FIVE_HOUR,
   LEAVE_SEVEN_DAY,
   SIGN_IN_WARN_MS,
+  READING_OLD_MS,
   agoText,
   availableNow,
   blockedAdvice,
@@ -545,9 +546,6 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   }
   return undefined
 }
-
-/** A reading older than this (two of every session's checks) says how old it is in the pane. */
-const READING_OLD_MS = 20 * 60_000
 
 /** A window's name column: "5h", "week", or a model's own week ("Fable"), and a space. */
 const WINDOW_NAME_WIDTH = 6

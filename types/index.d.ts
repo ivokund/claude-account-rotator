@@ -93,6 +93,12 @@ export type View = {
   /** This session only: the model its main loop asks for, as its last request named it. */
   model?: string
   /**
+   * This session only: the mod has started in it before. A later start is a
+   * reload of its code, which finds the session at work: only a window that
+   * has just opened starts elsewhere.
+   */
+  hasStarted?: boolean
+  /**
    * This session only: the logins whose token had run out at their last
    * check. Only Claude Code renews a token, as a session sends a request, so
    * no session has used such a login lately, and its usage isn't read until one does.

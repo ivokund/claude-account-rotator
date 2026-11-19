@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, nextReset, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
+import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, nextReset, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, startWhy, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -227,6 +227,16 @@ test('a new Fable session starts only where the Fable week has room too', () => 
   v.readings['2'] = { ...v.readings['2']!, sevenDay: { pct: 10, resetsAt: '2026-10-14T03:00:00Z' }, models: { Fable: { pct: 90, resetsAt: WEEK_END } } }
   expect(pickStart(v, NOW, {})?.id).toBe('2')
   expect(pickStart({ ...v, model: 'claude-fable-5-2' }, NOW, {})?.id).toBe('3')
+})
+
+test('a new session\'s move says what its reading tells: how old, where it isn\'t from now', () => {
+  const at = NOW - 60_000
+  expect(startWhy(undefined, NOW)).toBe('it had no usage reading yet')
+  expect(startWhy({ sevenDay: { pct: 10, resetsAt: WEEK_END }, at }, NOW)).toBe('its week resets soonest')
+  expect(startWhy({ fiveHour: { pct: 0 }, sevenDay: { pct: 10, resetsAt: WEEK_END }, at }, NOW)).toBe("its 5-hour window hadn't started")
+  expect(startWhy({ fiveHour: { pct: 0 }, at: NOW - 125 * 60_000 }, NOW)).toBe("its 5-hour window hadn't started when read 2h 5m ago")
+  // Read while a window ran that has ended since: what the account did after is not known.
+  expect(startWhy({ fiveHour: { pct: 60, resetsAt: LATER }, at }, Date.parse(LATER) + 60_000)).toBe('its 5-hour window had reset since it was read 2h 2m ago')
 })
 
 test('says how long ago, in minutes, hours or days', () => {

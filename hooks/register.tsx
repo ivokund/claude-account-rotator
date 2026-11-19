@@ -52,6 +52,7 @@ import {
   slotEnv,
   startOnFrom,
   spentReading,
+  startWhy,
   stuckText,
   usageReadAt,
   viewScope,
@@ -275,11 +276,9 @@ async function setStartOn($: Host, startOn: StartOn): Promise<void> {
 /**
  * Where this new session starts, with "a fresh 5-hour window" picked: the
  * login pickStart picks, claimed so the next new session starts elsewhere.
- * Undefined with Claude Code's login picked, or where the session can't switch.
  */
 async function startPick($: Host): Promise<Account | undefined> {
   const view = await getView($)
-  if (view.startOn !== 'fresh' || view.isSwitchBlocked) return undefined
   const now = await $.clock.now()
   const stored = await $.store.get('start-claims')
   const claims: Record<string, number> = {}
@@ -291,12 +290,9 @@ async function startPick($: Host): Promise<Account | undefined> {
   return pick
 }
 
-/** Why a new session moved to `account` as it opened, as far as its reading tells. */
-function startWhy(view: View, account: Account): string {
-  const r = view.readings[account.id]
-  if (r === undefined) return 'it had no usage reading yet'
-  if (r.fiveHour === undefined) return 'its week resets soonest'
-  return "its 5-hour window hadn't started"
+/** Why a new session moves to `account` as it opens, as far as its reading tells now. */
+async function startReason($: Host, account: Account): Promise<string> {
+  return startWhy((await getView($)).readings[account.id], await $.clock.now())
 }
 
 /** Names the account the Chrome extension is signed in to, for every session; none forgets it. */
@@ -551,7 +547,8 @@ async function checkAccount($: Host, account: Account, isUrgent = false): Promis
   }
 }
 
-async function checkAll($: Host): Promise<void> {
+/** Checks every login in turn: one whose check fails leaves the rest theirs. */
+async function checkAccounts($: Host): Promise<void> {
   for (const account of (await getView($)).accounts) {
     try {
       await checkAccount($, account)
@@ -559,6 +556,10 @@ async function checkAll($: Host): Promise<void> {
       await debug($, `checking account ${account.id} failed: ${String(error)}`)
     }
   }
+}
+
+async function checkAll($: Host): Promise<void> {
+  await checkAccounts($)
   await maybeRotate($)
 }
 
@@ -995,7 +996,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string, start?: Account
       await setView($, v => ({ ...v, chromeConnecting: undefined }))
     }
     // A new session that was to start elsewhere, and Connect never ran: it moves there now.
-    if (done === undefined && start !== undefined) await switchTo($, start, startWhy(await getView($), start))
+    if (done === undefined && start !== undefined) await switchTo($, start, await startReason($, start))
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
     const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
@@ -1067,8 +1068,9 @@ async function connectingChrome(
   }
   // Back to the login the session was on, or on to the one a new session starts on.
   const to = start ?? from
-  if (to.id !== target.id) await leaveVisit($, to, start === undefined ? undefined : startWhy(await getView($), start))
-  else if (start !== undefined && isVisit) tell($, `Switched to Claude account ${label(start)}: ${startWhy(await getView($), start)}.`)
+  if (to.id !== target.id) await leaveVisit($, to, start === undefined ? undefined : await startReason($, start))
+  // The visit is where the new session stays: said as any switch is, once made.
+  else if (start !== undefined && isVisit) toastSwitched($, await getView($), { id: start.id, from: from.id, since: 0, why: await startReason($, start) })
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as Claude account ${label(target)}.`)
   if (!isQuiet && answer === 'unpaired') {
     const back = isTrial ? view.accounts.find(a => a.id === view.chromeAccountId) : undefined
@@ -1336,20 +1338,33 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
   const model = await $.session.model().catch(() => undefined)
+  // The mod starts again at every reload of its code, in a session by then at work: only its first start is a window opening.
+  const isOpening = (await getView($)).hasStarted !== true
   await mergeStore($)
-  await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }), ...(model === undefined ? {} : { model }) }))
+  await setView($, v => ({ ...v, activeId, hasStarted: true, ...(sessionId === undefined ? {} : { sessionId }), ...(model === undefined ? {} : { model }) }))
   await checkSwitching($, slot)
-  // A new tab on Claude Code's login, with "a fresh 5-hour window" picked: where it starts.
-  const start = isInteractive && slot === '' ? await startPick($) : undefined
+  // A window opening on Claude Code's login, with "a fresh 5-hour window" picked, may start elsewhere.
+  const opened = await getView($)
+  const isStarting = isInteractive && isOpening && slot === '' && opened.startOn === 'fresh' && opened.isSwitchBlocked !== true
+  // Where, goes by readings taken now, as far as the logins can be read: the store's may be old, and say nothing of a sign-in lost since.
+  if (isStarting) await checkAccounts($)
+  const start = isStarting
+    ? await startPick($).catch(async error => {
+        await debug($, `picking where to start failed: ${String(error)}`)
+        return undefined
+      })
+    : undefined
   const startOn = start !== undefined && start.id !== activeId ? start : undefined
   // First, while the session can still move: the rotation waits for it. Connect's visit ends where the session starts.
   if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {
     void connectChrome($, true, undefined, startOn).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
   } else if (startOn !== undefined) {
-    await switchTo($, startOn, startWhy(await getView($), startOn))
+    // A move that fails leaves the session on Claude Code's login, and the checks below their turn.
+    await switchTo($, startOn, await startReason($, startOn)).catch(error => debug($, `starting on account ${startOn.id} failed: ${String(error)}`))
   }
   // A live sign-in names its login as it checks; one whose token has run out, from what `claude auth login` left in its folder.
-  await checkAll($)
+  if (isStarting) await maybeRotate($)
+  else await checkAll($)
   for (const account of (await loadAccounts($)).filter(a => a.email === undefined || a.orgId === undefined)) {
     const who = await signedInAs($, account.slot)
     if (who === undefined) continue

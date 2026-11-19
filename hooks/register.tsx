@@ -74,11 +74,13 @@ const SETTLE_MS = 35_000
 const CONFIRM_GIVE_UP_MS = 4 * 60_000
 /** A beat of the in-use mark's blink while a switch is not yet seen to land: lit one beat, unlit the next. */
 const BLINK_MS = 500
-/** How often a switch asks who the session's sign-in is, for its first CONFIRM_POLL_FOR_MS; the minute's timer asks after, while a verdict can still come. */
+/** How often a switch asks who the session's sign-in is, for its first CONFIRM_POLL_FOR_MS, once a request has gone out since; the minute's timer asks after, while a verdict can still come. */
 const CONFIRM_POLL_MS = 5_000
 const CONFIRM_POLL_FOR_MS = SETTLE_MS + 15_000
-/** How long after a request a verdict on the switch it tests is waited for: a switch is given up CONFIRM_GIVE_UP_MS on, at the minute's check. */
-const AWAIT_MS = CONFIRM_GIVE_UP_MS + 60_000
+/** How many of the minute's checks ask for a verdict on a switch after the request that tests it: giving up comes CONFIRM_GIVE_UP_MS after the switch, at one of them. */
+const AWAIT_CHECKS = 10
+/** On a timer, a request counts as a test of a switch this long after it set out: Claude Code reads the sign-in again as it sends it, once every hook has had its say. */
+const REREAD_MS = 5_000
 /** A reading this fresh, from any session, is not asked for again by the routine check: every session asking every login piles up. */
 const USAGE_FRESH_MS = 5 * 60_000
 /** After Anthropic rate limits a usage check, how long every session leaves the usage endpoint be, at least. */
@@ -133,6 +135,8 @@ let isSettling = false
  * holds, which the profile check sees, may still be the one before.
  */
 let lastRequestAt: number | undefined
+/** The minute's checks that asked for a verdict on the switch waited on, since the last request. */
+let checks = 0
 /** Connect is under way: the rotation waits for it, and browser calls are held back. */
 let isConnectingChrome = false
 
@@ -621,7 +625,7 @@ async function maybeRotate($: Host): Promise<boolean> {
     return false
   }
   const { pending } = view
-  const isWaiting = pending !== undefined && (pending.isPicked === true || isAwaited(pending, now))
+  const isWaiting = pending !== undefined && (pending.isPicked === true || isAwaited(pending))
   if (isConnectingChrome || view.rotateTo === 'off' || isWaiting || !shouldLeave(view, now)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
@@ -774,15 +778,24 @@ async function settleOnce($: Host, isResponse: boolean): Promise<void> {
  * confirms it. Where the session's sign-in can't be asked about, the latest
  * response's usage tells, once SETTLE_MS has passed; then only a response to
  * such a request, still answered by the old login minutes later, is reported.
- * The minute's check asks only while a verdict can still come: an idle
- * session's switch, shown as made, has nothing new to tell until a request.
+ * A response always asks. The timers ask only once a request has gone out
+ * since the switch, as until then Claude Code holds the sign-in it held, and
+ * only while a verdict can still come: an idle session's switch, shown as
+ * made, has nothing new to tell until a request.
  */
 async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const { pending, accounts } = await getView($)
   if (pending === undefined) return
-  if (!isResponse && !isAwaited(pending, await $.clock.now())) return
-  // Before asking: a request that goes out while the answer is on its way was not read for yet.
-  const hasRequested = isTried(pending)
+  const at = await $.clock.now()
+  if (!isResponse) {
+    if (!hasSentSince(pending) || !isAwaited(pending)) {
+      if (at - pending.since >= SETTLE_MS) await dueFor($, pending)
+      return
+    }
+    if (pending.isDue === true) checks += 1
+  }
+  // Before asking: a request that goes out while the answer is on its way was not read for yet. Nor, on a timer, was one that only just set out.
+  const hasRequested = isTried(pending) && (isResponse || (lastRequestAt !== undefined && at - lastRequestAt >= REREAD_MS))
   const live = await liveAccount($)
   const now = await $.clock.now()
   const isLate = now - pending.since > CONFIRM_GIVE_UP_MS
@@ -819,12 +832,18 @@ const isStill = (v: View, pending: Pending) => v.pending?.id === pending.id && v
 const isTried = (pending: Pending) => lastRequestAt !== undefined && lastRequestAt >= pending.since + SETTLE_MS
 
 /**
- * Whether a verdict on `pending` may still come: until it shows as made, and
- * for minutes after a request that tests it. Past that the session idles on
- * the new login, as far as anyone can tell, until its next request.
+ * Whether a request has gone out since `pending` was made: only then can
+ * Claude Code hold another sign-in than before it.
  */
-const isAwaited = (pending: Pending, now: number) =>
-  pending.isDue !== true || (isTried(pending) && lastRequestAt !== undefined && now - lastRequestAt <= AWAIT_MS)
+const hasSentSince = (pending: Pending) => lastRequestAt !== undefined && lastRequestAt >= pending.since
+
+/**
+ * Whether a verdict on `pending` may still come: until it shows as made, and
+ * after a request that tests it, for AWAIT_CHECKS of the minute's checks,
+ * however long they take to come. Past that the session idles on the new
+ * login, as far as anyone can tell, until its next request.
+ */
+const isAwaited = (pending: Pending) => pending.isDue !== true || (isTried(pending) && checks < AWAIT_CHECKS)
 
 /** Says, unless the switch was quiet or it was said already, that the session switched. */
 function toastSwitched($: Host, view: View, pending: Pending): void {
@@ -1475,6 +1494,7 @@ export const register: Register = on => {
   // Claude Code reads the sign-in again just before a request: the profile check is sure of a switch only after one.
   on('turn.step', async function* ($, e, next) {
     lastRequestAt = await $.clock.now()
+    checks = 0
     // The main loop's model, where no /model told it; a subagent's requests name their own.
     if (e.agentId === undefined && (await noteModel($, e.model))) {
       void maybeRotate($).catch(error => debug($, `rotate failed: ${String(error)}`))

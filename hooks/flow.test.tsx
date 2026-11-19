@@ -946,24 +946,44 @@ test('an idle session whose switch shows as made asks no more whose sign-in it h
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   expect(slots(w)).toEqual([SLOT2])
-  // 35 s on, with no request, the switch shows as made, and is told.
+  // 35 s on, with no request, the switch shows as made, and is told. Only a request makes Claude Code read the sign-in again: nothing was asked.
   await clock.advance(36_000)
   expect(w.toasts.filter(t => /^Switched to Claude account 2/.test(t))).toHaveLength(1)
-  const asked = w.sessionAsks
-  expect(asked).toBeGreaterThan(0)
-  // Nine idle minutes: only a request makes Claude Code read the sign-in again, so there is nothing new to ask, and nowhere to move.
+  expect(w.sessionAsks).toBe(0)
+  // Nine idle minutes: still nothing new to ask, and nowhere to move.
   await clock.advance(9 * 60_000)
-  expect(w.sessionAsks).toBe(asked)
+  expect(w.sessionAsks).toBe(0)
   expect(slots(w)).toEqual([SLOT2])
   // A request goes out, as login 2: the next minute's check asks, and finds the switch made.
   await request($, clock)
-  expect(w.sessionAsks).toBe(asked)
+  expect(w.sessionAsks).toBe(0)
   await clock.advance(60_000)
-  expect(w.sessionAsks).toBe(asked + 1)
+  expect(w.sessionAsks).toBe(1)
   await clock.advance(5 * 60_000)
-  expect(w.sessionAsks).toBe(asked + 1)
+  expect(w.sessionAsks).toBe(1)
   expect(w.toasts.filter(t => /^Switched to Claude account 2/.test(t))).toHaveLength(1)
   expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+})
+
+test('a session that sent its last request before a switch could land asks while the switch settles, and no more once it shows as made', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  // A request 20 s on still goes out as login 1, and the turn ends there: the checks ask until the switch shows as made, at 35 s.
+  await clock.advance(20_000)
+  await request($, clock)
+  await clock.advance(16_000)
+  const asked = w.sessionAsks
+  expect(asked).toBe(3)
+  // Idle from then on: that request was no test of the switch, and nothing is asked on its account.
+  await clock.advance(9 * 60_000)
+  expect(w.sessionAsks).toBe(asked)
+  expect(slots(w)).toEqual([SLOT2])
 })
 
 /** How often the usage endpoint was asked about login 2. */
@@ -1022,19 +1042,76 @@ test('where Claude Code lends plugins no sign-in, the check that shows a switch 
   await pane.unmount()
 })
 
-test('where Claude Code lends plugins no sign-in, a session that sent a request and then idles asks for no fresh usage on the minute, and five minutes on asks nothing at all', async ($, on) => {
+test('where Claude Code lends plugins no sign-in, a session that sent a request and then idles asks for no fresh usage on the minute, and after ten checks asks nothing at all', async ($, on) => {
   const { w, clock } = await unlentOnTwo(on, $)
   await clock.advance(36_000)
   // A request goes out; no response says whether the switch took.
   await request($, clock)
   const asked = askedOfTwo(w)
-  // The minute's checks compare with the reading taken as the switch showed as made: under five minutes old, it is not asked for again.
+  // The minute's checks compare with the reading taken as the session opened: under five minutes old, it is not asked for again.
   await clock.advance(4 * 60_000 + 20_000)
   expect(askedOfTwo(w)).toBe(asked)
-  // Five minutes after the request no verdict is waited for: the reading grows old, and the minute's checks leave it be.
-  await clock.advance(5 * 60_000 - 1_000)
-  expect(askedOfTwo(w)).toBe(asked)
+  // Ten checks on, at ten minutes, no verdict is waited for: readings grow old, and the minute's checks leave them be until the routine check.
+  await clock.advance(5 * 60_000 + 14_000)
+  const later = askedOfTwo(w)
+  await clock.advance(5 * 60_000 + 20_000)
+  expect(askedOfTwo(w)).toBe(later)
   expect(slots(w)).toEqual([SLOT2])
+  // Another request, and the next minute's check waits for a verdict again: with no reading under five minutes old, it asks.
+  await request($, clock)
+  await clock.advance(31_000)
+  expect(askedOfTwo(w)).toBe(later + 1)
+})
+
+test('a check that gets no answer as a switch should be given up is not the last: the next minute\'s check finds it did not take', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  const owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  w.owners = owners
+  w.isCacheStuck = true
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await clock.advance(36_000)
+  // A request goes out, still as login 1, and the session idles.
+  await request($, clock)
+  await clock.advance(4 * 60_000)
+  expect(w.toasts.filter(t => /did not take/.test(t))).toEqual([])
+  // Five minutes after the switch the profile endpoint does not answer: nothing is given up, and nothing is taken as settled.
+  w.owners = {}
+  await clock.advance(30_000)
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+  // It answers again a minute later.
+  w.owners = owners
+  await clock.advance(60_000)
+  expect(w.toasts.filter(t => /did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(slots(w)).toEqual([SLOT2, ''])
+})
+
+test('a request that only just set out is no test of a switch yet: the minute\'s check a moment later gives nothing up, and the one after does', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  w.isCacheStuck = true
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  // Idle for minutes; the first prompt's request sets out two seconds before the minute's check.
+  await clock.advance(5 * 60_000 - 2_000)
+  await request($, clock)
+  await clock.advance(3_000)
+  expect(w.sessionAsks).toBe(1)
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+  expect(slots(w)).toEqual([SLOT2])
+  // A minute on Claude Code still sends login 1's sign-in: the switch did not take.
+  await clock.advance(60_000)
+  expect(w.toasts.filter(t => /did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(slots(w)).toEqual([SLOT2, ''])
 })
 
 /** A reading of a login another session took just now and stored: its 5-hour window nearly used up. */

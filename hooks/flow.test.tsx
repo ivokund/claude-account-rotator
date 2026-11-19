@@ -70,6 +70,13 @@ type World = {
   /** The tokens the usage endpoint was asked about, in order. */
   usageAsked: string[]
   /**
+   * Holds open each ask whose sign-in the session's is (the profile endpoint,
+   * with its handle), read as the ask is made: `arrived` is called once one
+   * waits, and it answers once `open` resolves. What the session does
+   * meanwhile comes before the answer.
+   */
+  profileGate?: { arrived: () => void; open: Promise<void> }
+  /**
    * The store itself, where a test gives one: every session of the mod shares
    * it, so the test reads what this session stored, and writes what another
    * session would meanwhile.
@@ -160,6 +167,10 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     const own = e.init?.auth === 'session-sign-in' ? credentialFrom(w.keychain[await keychainItem(heldSlot())] ?? '')?.accessToken : undefined
     const token = own ?? (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
     if (e.url === 'https://api.anthropic.com/api/oauth/profile') {
+      if (own !== undefined && w.profileGate !== undefined) {
+        w.profileGate.arrived()
+        await w.profileGate.open
+      }
       const email = w.owners[token]
       if (email === undefined) return { value: { status: 404, ok: false, headers: {}, text: '' } }
       const profile = {
@@ -820,6 +831,104 @@ test('a switch made while Claude is working lands with its next request 30 s on,
   await pane.redraw()
   expect(await pane.find({ type: 'Text', text: '● in use' })).toBeDefined()
   expect(w.toasts.filter(t => /^Switched to Claude account 2/.test(t))).toHaveLength(1)
+  await pane.unmount()
+})
+
+test('a second switch made before the first could land, neither taking: the session goes back to the login its requests really use, though it is not the one the second switch left', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.usage['tok-3'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com', 'tok-3': 'three@example.com' }
+  w.isCacheStuck = true
+  const clock = world(on, w, THREE_LOGINS)
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  // Ten seconds on, before login 2's sign-in was ever read, on to login 3: the switch waited on leaves login 2, which no request went out as.
+  await clock.advance(10_000)
+  await pane.press({ key: 'use-3' })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  // Minutes on a request goes out, and Claude Code still sends login 1's sign-in.
+  await clock.advance(5 * 60_000)
+  await request($, clock)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: [{ kind: 'five_hour', percentUsed: 21, resetsAt: '2026-10-12T12:00:00Z' }], changed: ['rateLimits'] })
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /has not shown/.test(t))).toEqual([])
+  expect(slots(w)).toEqual([SLOT2, SLOT3, ''])
+  await pane.redraw()
+  expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/● in use/)
+  await pane.unmount()
+})
+
+test('where Claude Code lends plugins no sign-in, a late response to a request sent before the switch could land gives nothing up; one to a request sent since does', async ($, on) => {
+  const w = fresh()
+  w.lendsSignIn = false
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  // A response five minutes on, to a request that went out as login 1 before the switch: its usage is login 1's, as it should be.
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  await clock.advance(5 * 60_000)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+  expect(slots(w)).toEqual([SLOT2])
+  // A request goes out, and its response is login 1's still: the switch did not take.
+  await request($, clock)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(slots(w)).toEqual([SLOT2, ''])
+})
+
+test('a prompt sent while the mod is asking whose sign-in the session holds is not told its switch did not take: the answer was read before the request', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  // Idle for minutes: the switch shows as made, and Claude Code still holds login 1's sign-in.
+  await clock.advance(5 * 60_000)
+  let arrive = () => {}
+  let open = () => {}
+  const arrived = new Promise<void>(resolve => (arrive = resolve))
+  w.profileGate = { arrived: arrive, open: new Promise<void>(resolve => (open = resolve)) }
+  // A check starts, and asks; before it is answered, the first prompt's request goes out, reading login 2's sign-in.
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: [], changed: ['rateLimits'] })
+  await arrived
+  const stream = $.turn.step({ turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // The chunks say nothing here.
+  }
+  await stream.result
+  delete w.profileGate
+  open()
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+  expect(slots(w)).toEqual([SLOT2])
+  // The next check finds login 2's sign-in.
+  await clock.advance(60_000)
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/● in use/)
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
   await pane.unmount()
 })
 

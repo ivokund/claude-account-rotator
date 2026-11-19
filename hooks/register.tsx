@@ -753,23 +753,25 @@ async function settleOnce($: Host, isResponse: boolean): Promise<void> {
 /**
  * After a switch: which login is the session's sign-in now? The new one
  * confirms the switch. Claude Code reads it again only before a request, so
- * the old one says the switch did not take only once a request went out
- * SETTLE_MS after it, and minutes have passed. With none yet, the next request
- * will read the new one: SETTLE_MS on, the switch shows as made (due), and the
- * first request after confirms it. Where the session's sign-in can't be asked
- * about, the latest response's usage tells, once SETTLE_MS has passed; then
- * only a response still answered by the old login minutes later is reported.
+ * another says the switch did not take only once a request went out SETTLE_MS
+ * after it, and minutes have passed: the session goes back to that one, the
+ * login it left or not. With none yet, the next request will read the new one:
+ * SETTLE_MS on, the switch shows as made (due), and the first request after
+ * confirms it. Where the session's sign-in can't be asked about, the latest
+ * response's usage tells, once SETTLE_MS has passed; then only a response to
+ * such a request, still answered by the old login minutes later, is reported.
  */
 async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const { pending, accounts } = await getView($)
   if (pending === undefined) return
+  // Before asking: a request that goes out while the answer is on its way was not read for yet.
+  const hasRequested = isTried(pending)
   const live = await liveAccount($)
   const now = await $.clock.now()
   const isLate = now - pending.since > CONFIRM_GIVE_UP_MS
   if (live !== undefined) {
-    const hasRequested = lastRequestAt !== undefined && lastRequestAt >= pending.since + SETTLE_MS
     if (live !== 'other' && live.id === pending.id) await confirmPending($, pending)
-    else if (hasRequested && isLate) await giveUpPending($, pending, live !== 'other' && live.id === pending.from ? live : undefined)
+    else if (hasRequested && isLate) await giveUpPending($, pending, live === 'other' ? undefined : live)
     else if (now - pending.since >= SETTLE_MS) await dueFor($, pending)
     return
   }
@@ -779,7 +781,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   if (target !== undefined) await checkAccount($, target, true)
   if (sameUsage(reading, (await getView($)).readings[pending.id], now)) {
     await confirmPending($, pending)
-  } else if (isResponse && isLate) {
+  } else if (isResponse && isLate && hasRequested) {
     const from = accounts.find(a => a.id === pending.from)
     if (from !== undefined) await checkAccount($, from, true)
     const isFrom = from !== undefined && sameUsage(reading, (await getView($)).readings[from.id], now)
@@ -791,6 +793,12 @@ type Pending = NonNullable<View['pending']>
 
 /** Whether `pending` is still the switch the session waits on: another may have taken its place meanwhile. */
 const isStill = (v: View, pending: Pending) => v.pending?.id === pending.id && v.pending.since === pending.since
+
+/**
+ * Whether a request went out once `pending` could land: Claude Code read the
+ * sign-in again before it, so what follows tells whether the switch took.
+ */
+const isTried = (pending: Pending) => lastRequestAt !== undefined && lastRequestAt >= pending.since + SETTLE_MS
 
 /** Says, unless the switch was quiet or it was said already, that the session switched. */
 function toastSwitched($: Host, view: View, pending: Pending): void {
@@ -822,9 +830,10 @@ async function dueFor($: Host, pending: Pending): Promise<void> {
 }
 
 /**
- * The switch did not take, minutes on. Still on `from`, the login left, the
- * session is pointed back at it, and it shows in use again, as it is the one
- * spending; the rotation leaves the other be. On neither, it says so.
+ * The switch did not take, minutes on. Still on `from`, the login its
+ * requests go out as, the session is pointed back at it, and it shows in use
+ * again, as it is the one spending; the rotation leaves the other be. Where
+ * that is no login on the list, or can't be told, it says so.
  */
 async function giveUpPending($: Host, pending: Pending, from: Account | undefined): Promise<void> {
   if (!isStill(await getView($), pending)) return
@@ -840,7 +849,9 @@ async function giveUpPending($: Host, pending: Pending, from: Account | undefine
   } catch (error) {
     await debug($, `switch back failed: ${String(error)}`)
   }
-  await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
+  // Another switch made meanwhile is the one waited on now: its own check says how it went.
+  const after = await setView($, v => (isStill(v, pending) ? { ...v, activeId: from.id, pending: undefined } : v))
+  if (after.pending !== undefined || after.activeId !== from.id) return
   tell(
     $,
     `The switch to Claude account ${pending.id} did not take: responses still use account ${label(from)}, so it shows in use again. ` +

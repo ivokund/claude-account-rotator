@@ -117,7 +117,7 @@ let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
 /** A switch the refresh guard holds back: the latest one asked for, tried again each minute until it goes. */
-let held: { target: Account; why: string; isOpening: boolean; timer: Timer } | undefined
+let held: { target: Account; why: string; isOpening: boolean; isPicked: boolean; timer: Timer } | undefined
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
 const untaken = new Set<string>()
 /** When this session last moved to another login: until SETTLE_MS after, its requests may still go out as the one before. */
@@ -600,10 +600,13 @@ function whyLeave(view: View, now: number): string {
 /**
  * Once the active login is spent or locked out, moves to the one the pane's
  * Rotation setting picks; never while it is off, Claude Code's policy refuses
- * it, or Connect holds the session where it is. Refused, it says once how to
- * get a session that can move: a background session nobody watches gets the
- * notification. Not from a turn that dies on the limit: Claude Code's security
- * default, seated in such a session, passes its StopFailure hook over.
+ * it, or Connect holds the session where it is. Nor over a switch a verdict
+ * may still come on, or one the person picked; one an idle session only shows
+ * as made is a login like any other, to move on from once it is spent.
+ * Refused, it says once how to get a session that can move: a background
+ * session nobody watches gets the notification. Not from a turn that dies on
+ * the limit: Claude Code's security default, seated in such a session, passes
+ * its StopFailure hook over.
  */
 async function maybeRotate($: Host): Promise<boolean> {
   const now = await $.clock.now()
@@ -617,7 +620,9 @@ async function maybeRotate($: Host): Promise<boolean> {
     }
     return false
   }
-  if (isConnectingChrome || view.rotateTo === 'off' || view.pending !== undefined || !shouldLeave(view, now)) return false
+  const { pending } = view
+  const isWaiting = pending !== undefined && (pending.isPicked === true || isAwaited(pending, now))
+  if (isConnectingChrome || view.rotateTo === 'off' || isWaiting || !shouldLeave(view, now)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
   return target === undefined ? false : switchTo($, target, whyLeave(view, now))
@@ -646,12 +651,19 @@ async function refreshingSoon(
 }
 
 /**
+ * How a switch is made. `isQuiet`: no toast says so once it lands.
+ * `isOpening`: the move a new session starts with, which also waits for a
+ * token that has run out. `isPicked`: the person's own pick, which the
+ * rotation leaves be until a request confirms it.
+ */
+type SwitchOptions = { isQuiet?: boolean; isOpening?: boolean; isPicked?: boolean }
+
+/**
  * Points this session at `target`; false while the refresh guard holds it
  * back, or Claude Code's policy refuses it. A toast says so once the switch is
- * seen to land; a quiet one has none. `isOpening`: the move a new session
- * starts with, which also waits for a token that has run out.
+ * seen to land; a quiet one has none.
  */
-async function switchTo($: Host, target: Account, why: string, isQuiet = false, isOpening = false): Promise<boolean> {
+async function switchTo($: Host, target: Account, why: string, { isQuiet = false, isOpening = false, isPicked = false }: SwitchOptions = {}): Promise<boolean> {
   const turning = await refreshingSoon($, await getView($), target, await $.clock.now(), isOpening)
   if (turning !== undefined) {
     if (held === undefined) {
@@ -662,10 +674,10 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
           : `Switching to Claude account ${target.id} in a few minutes, once account ${turning.account.id}'s token has refreshed.`,
       )
       const retry = () => {
-        if (held !== undefined) void switchTo($, held.target, held.why, false, held.isOpening)
+        if (held !== undefined) void switchTo($, held.target, held.why, { isOpening: held.isOpening, isPicked: held.isPicked })
       }
-      held = { target, why, isOpening, timer: $.clock.every(60_000, retry) }
-    } else held = { ...held, target, why, isOpening }
+      held = { target, why, isOpening, isPicked, timer: $.clock.every(60_000, retry) }
+    } else held = { ...held, target, why, isOpening, isPicked }
     return false
   }
   held?.timer.cancel()
@@ -685,7 +697,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
   await setView($, v => ({
     ...v,
     activeId: target.id,
-    pending: { id: target.id, from: v.activeId, since: now, ...(isQuiet ? {} : { why }) },
+    pending: { id: target.id, from: v.activeId, since: now, ...(isQuiet ? {} : { why }), ...(isPicked ? { isPicked } : {}) },
     removing: undefined,
   }))
   watchSwitch($, now)
@@ -1056,7 +1068,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string, start?: Account
       await setView($, v => ({ ...v, chromeConnecting: undefined }))
     }
     // A new session that was to start elsewhere, and Connect never ran: it moves there now.
-    if (done === undefined && start !== undefined) await switchTo($, start, await startReason($, start), false, true)
+    if (done === undefined && start !== undefined) await switchTo($, start, await startReason($, start), { isOpening: true })
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
     const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
@@ -1104,7 +1116,7 @@ async function connectingChrome(
   }
   await setView($, v => ({ ...v, chromeConnecting: target.id }))
   const isVisit = from.id !== target.id
-  if (isVisit && !(await switchTo($, target, 'Claude in Chrome connects as it', true))) return undefined
+  if (isVisit && !(await switchTo($, target, 'Claude in Chrome connects as it', { isQuiet: true }))) return undefined
   const wait = movedAt === undefined ? 0 : movedAt + SETTLE_MS - (await $.clock.now())
   if (wait > 0) await $.clock.sleep(wait)
   // A connection made before, as whichever login the session was on then, is made again as this one.
@@ -1155,7 +1167,7 @@ async function leaveVisit($: Host, to: Account, why?: string): Promise<void> {
   const health = view.health[to.id]?.kind
   const canServe = health !== 'login-needed' && health !== 'logging-in' && !shouldLeave({ ...view, activeId: to.id }, now)
   if (view.rotateTo === 'off' || canServe) {
-    await switchTo($, to, why ?? 'back from connecting Claude in Chrome', why === undefined)
+    await switchTo($, to, why ?? 'back from connecting Claude in Chrome', { isQuiet: why === undefined })
     return
   }
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
@@ -1363,7 +1375,7 @@ function actions($: Host): Actions {
       background(
         getView($).then(view => {
           const account = view.accounts.find(a => a.id === id)
-          return account === undefined ? false : switchTo($, account, 'you picked it')
+          return account === undefined ? false : switchTo($, account, 'you picked it', { isPicked: true })
         }),
       ),
     askRemove: id => background(setView($, v => ({ ...v, removing: id }))),
@@ -1428,7 +1440,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
     void connectChrome($, true, undefined, startOn).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
   } else if (startOn !== undefined) {
     // A move that fails leaves the session on Claude Code's login, and the checks below their turn.
-    await switchTo($, startOn, await startReason($, startOn), false, true).catch(error => debug($, `starting on account ${startOn.id} failed: ${String(error)}`))
+    await switchTo($, startOn, await startReason($, startOn), { isOpening: true }).catch(error => debug($, `starting on account ${startOn.id} failed: ${String(error)}`))
   }
   // A live sign-in names its login as it checks; one whose token has run out, from what `claude auth login` left in its folder.
   if (isStarting) await maybeRotate($)

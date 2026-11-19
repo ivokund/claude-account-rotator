@@ -111,8 +111,12 @@ export type View = {
    * for a quiet one, as Claude in Chrome's visits are, or once told. `isDue`:
    * SETTLE_MS on, with no request since to show it, so the next request reads
    * the new sign-in: it shows switched, and the first request after confirms it.
+   * An idle session can show it so for hours: the rotation then counts the new
+   * login as the one in use, and moves on from it once it is spent. `isPicked`:
+   * the person pressed Use now, and the rotation leaves it be until a request
+   * confirms it.
    */
-  pending?: { id: string; from: string; since: number; why?: string; isDue?: boolean }
+  pending?: { id: string; from: string; since: number; why?: string; isDue?: boolean; isPicked?: boolean }
   /** Anthropic rate limited a usage check: no session asks again until then, epoch ms. */
   usagePausedUntil?: number
   /** Account id whose removal waits for a second press. */

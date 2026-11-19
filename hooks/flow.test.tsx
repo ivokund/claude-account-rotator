@@ -1037,6 +1037,152 @@ test('where Claude Code lends plugins no sign-in, a session that sent a request 
   expect(slots(w)).toEqual([SLOT2])
 })
 
+/** A reading of a login another session took just now and stored: its 5-hour window nearly used up. */
+const lowReading = (clock: MockClock) => ({
+  fiveHour: { pct: 95, resetsAt: '2026-10-12T12:00:00Z' },
+  sevenDay: { pct: 30, resetsAt: '2026-10-18T03:00:00Z' },
+  at: clock.now(),
+})
+
+/** Three signed-in logins, with their usage, whose sign-ins the profile endpoint knows; `set` changes the world before the session starts. */
+async function threeKnown(on: Parameters<typeof world>[0], usage: [number, number][], set: (w: World) => void = () => {}): Promise<{ w: World; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  usage.forEach((used, i) => (w.usage[`tok-${i + 1}`] = used))
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com', 'tok-3': 'three@example.com' }
+  set(w)
+  return { w, clock: world(on, w, THREE_LOGINS) }
+}
+
+/** The session starts on login 1, which is spent, and the rotation moves it to login 2, the one with the most room; login 3 has room too. */
+async function movedToTwo(on: Parameters<typeof world>[0], $: Engine, set?: (w: World) => void): Promise<{ w: World; clock: MockClock }> {
+  const { w, clock } = await threeKnown(on, [[93, 40], [10, 30], [20, 30]], set)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  return { w, clock }
+}
+
+test('an idle session the rotation moved to an account that then runs low moves on again, though no request confirmed the first switch, and says why', async ($, on) => {
+  const { w, clock } = await movedToTwo(on, $)
+  await clock.advance(36_000)
+  // Other sessions use login 2 up, and the routine check reads it.
+  w.usage['tok-2'] = [95, 30]
+  await clock.advance(10 * 60_000)
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Switched to Claude account 3 \(three@example\.com · Org\): account 2 has/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+})
+
+test('where Claude Code lends plugins no sign-in, an idle session moved to an account that then runs low moves on again too', async ($, on) => {
+  const { w, clock } = await movedToTwo(on, $, world => (world.lendsSignIn = false))
+  await clock.advance(36_000)
+  w.usage['tok-2'] = [95, 30]
+  await clock.advance(10 * 60_000)
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Switched to Claude account 3 .*: account 2 has/.test(t))).toHaveLength(1)
+})
+
+test('while a request is testing a switch the rotation leaves it be, though its account runs low; found not to take, the session goes back, and moves on from there', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const { w, clock } = await movedToTwo(on, $, world => {
+    world.isCacheStuck = true
+    world.shared = shared
+  })
+  await clock.advance(36_000)
+  // A request goes out, still as login 1; meanwhile other sessions use login 2 up, as the store tells every session.
+  await request($, clock)
+  shared['reading:2'] = lowReading(clock)
+  w.usage['tok-2'] = [95, 30]
+  await clock.advance(3 * 60_000)
+  expect(slots(w)).toEqual([SLOT2])
+  // Minutes on the switch is found not to take: back on login 1, which is spent, the session moves to login 3.
+  await clock.advance(2 * 60_000)
+  expect(w.toasts.filter(t => /switch to Claude account 2 did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(slots(w)).toEqual([SLOT2, '', SLOT3])
+})
+
+test('a switch not yet shown as made is left be, though its account runs low meanwhile: once it shows as made, the idle session moves on', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const { w, clock } = await threeKnown(on, [[20, 30], [10, 30], [15, 30]], world => (world.shared = shared))
+  await start($, clock)
+  expect(slots(w)).toEqual([])
+  // Rotate now, 40 s in: off the minute's checks, so one comes 20 s into the switch.
+  await clock.advance(40_000)
+  const pane = await mountPane($)
+  await pane.press({ key: 'rotate' })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  shared['reading:2'] = lowReading(clock)
+  w.usage['tok-2'] = [95, 30]
+  await clock.advance(21_000)
+  expect(slots(w)).toEqual([SLOT2])
+  // Shown as made 35 s after the switch, with no request: the next minute's check moves on.
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  await pane.unmount()
+})
+
+test('where Claude Code lends plugins no sign-in, a switch a request tested long ago, with no verdict since, holds an idle session back no more', async ($, on) => {
+  const { w, clock } = await movedToTwo(on, $, world => (world.lendsSignIn = false))
+  await clock.advance(36_000)
+  // A request goes out, and no response says whether the switch took.
+  await request($, clock)
+  w.usage['tok-2'] = [95, 30]
+  await clock.advance(10 * 60_000)
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+})
+
+test('an idle session moved on over a switch no request tested, the new switch not taking: it goes back to the login its requests really use', async ($, on) => {
+  const shared: Record<string, unknown> = {}
+  const { w, clock } = await movedToTwo(on, $, world => {
+    world.isCacheStuck = true
+    world.shared = shared
+  })
+  await clock.advance(36_000)
+  shared['reading:2'] = lowReading(clock)
+  w.usage['tok-2'] = [95, 30]
+  await clock.advance(24_000)
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  // Minutes on a request goes out, and Claude Code still sends login 1's sign-in: neither switch ever took.
+  await clock.advance(36_000 + 4 * 60_000)
+  await request($, clock)
+  await clock.advance(24_000)
+  expect(w.toasts.filter(t => /switch to Claude account 3 did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /has not shown/.test(t))).toEqual([])
+  expect(slots(w)).toEqual([SLOT2, SLOT3, ''])
+})
+
+test('an account picked with Use now, low as it is, stays an idle session\'s until a request confirms it: the rotation moves on only then', async ($, on) => {
+  const { w, clock } = await threeKnown(on, [[20, 30], [95, 30], [10, 30]])
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Switched to Claude account 2 .*: you picked it\.$/.test(t))).toHaveLength(1)
+  // Minutes of the minute's checks, login 2 past its mark all along: the pick stays.
+  await clock.advance(5 * 60_000)
+  expect(slots(w)).toEqual([SLOT2])
+  // The first request goes out as login 2, and its response shows it low: now the rotation moves on, as from any login.
+  await request($, clock)
+  await $.session.measure({
+    context: { window: 200_000 },
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 95, resetsAt: '2026-10-12T12:00:00Z' },
+      { kind: 'seven_day', percentUsed: 30, resetsAt: '2026-10-18T03:00:00Z' },
+    ],
+    changed: ['rateLimits'],
+  })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  await pane.unmount()
+})
+
 test('a reading from before its window reset says nothing of the usage since: the footer draws it unknown, not empty, and the pane says it reset', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')

@@ -839,16 +839,7 @@ test('a switch made while Claude is working lands with its next request 30 s on,
 })
 
 test('a second switch made before the first could land, neither taking: the session goes back to the login its requests really use, though it is not the one the second switch left', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
-  w.usage['tok-1'] = [20, 30]
-  w.usage['tok-2'] = [10, 30]
-  w.usage['tok-3'] = [10, 30]
-  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com', 'tok-3': 'three@example.com' }
-  w.isCacheStuck = true
-  const clock = world(on, w, THREE_LOGINS)
+  const { w, clock } = await threeKnown(on, [[20, 30], [10, 30], [10, 30]], world => (world.isCacheStuck = true))
   await start($, clock)
   const pane = await mountPane($)
   await pane.press({ key: 'use-2' })
@@ -872,15 +863,7 @@ test('a second switch made before the first could land, neither taking: the sess
 })
 
 test('where Claude Code lends plugins no sign-in, a late response to a request sent before the switch could land gives nothing up; one to a request sent since does', async ($, on) => {
-  const w = fresh()
-  w.lendsSignIn = false
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [93, 40]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  expect(slots(w)).toEqual([SLOT2])
+  const { w, clock } = await unlentOnTwo(on, $)
   // A response five minutes on, to a request that went out as login 1 before the switch: its usage is login 1's, as it should be.
   w.limits = [
     { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
@@ -900,15 +883,7 @@ test('where Claude Code lends plugins no sign-in, a late response to a request s
 })
 
 test('a prompt sent while the mod is asking whose sign-in the session holds is not told its switch did not take: the answer was read before the request', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [93, 40]
-  w.usage['tok-2'] = [10, 30]
-  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  expect(slots(w)).toEqual([SLOT2])
+  const { w, clock } = await lentOnTwo(on, $)
   // Idle for minutes: the switch shows as made, and Claude Code still holds login 1's sign-in.
   await clock.advance(5 * 60_000)
   let arrive = () => {}
@@ -937,15 +912,7 @@ test('a prompt sent while the mod is asking whose sign-in the session holds is n
 })
 
 test('an idle session whose switch shows as made asks no more whose sign-in it holds; once a request has gone out the minute\'s check asks, and confirms the switch', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [93, 40]
-  w.usage['tok-2'] = [10, 30]
-  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  expect(slots(w)).toEqual([SLOT2])
+  const { w, clock } = await lentOnTwo(on, $)
   // 35 s on, with no request, the switch shows as made, and is told. Only a request makes Claude Code read the sign-in again: nothing was asked.
   await clock.advance(36_000)
   expect(w.toasts.filter(t => /^Switched to Claude account 2/.test(t))).toHaveLength(1)
@@ -966,14 +933,7 @@ test('an idle session whose switch shows as made asks no more whose sign-in it h
 })
 
 test('a session that sent its last request before a switch could land asks while the switch settles, and no more once it shows as made', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [93, 40]
-  w.usage['tok-2'] = [10, 30]
-  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
+  const { clock, w } = await lentOnTwo(on, $)
   // A request 20 s on still goes out as login 1, and the turn ends there: the checks ask until the switch shows as made, at 35 s.
   await clock.advance(20_000)
   await request($, clock)
@@ -989,19 +949,27 @@ test('a session that sent its last request before a switch could land asks while
 /** How often the usage endpoint was asked about login 2. */
 const askedOfTwo = (w: World) => w.usageAsked.filter(token => token === 'tok-2').length
 
-/** Two logins where Claude Code lends plugins no sign-in; the session starts on login 1, which is spent, and moves to login 2. No response says anything yet. */
-async function unlentOnTwo(on: Parameters<typeof world>[0], $: Engine): Promise<{ w: World; clock: MockClock }> {
+/**
+ * Two logins whose sign-ins the profile endpoint knows; the session starts on
+ * login 1, which is spent, and the rotation moves it to login 2. No response
+ * says anything yet. `set` changes the world before the session starts.
+ */
+async function lentOnTwo(on: Parameters<typeof world>[0], $: Engine, set: (w: World) => void = () => {}): Promise<{ w: World; clock: MockClock }> {
   const w = fresh()
-  w.lendsSignIn = false
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [93, 40]
   w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  set(w)
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   expect(slots(w)).toEqual([SLOT2])
   return { w, clock }
 }
+
+/** The same where Claude Code lends plugins no sign-in. */
+const unlentOnTwo = (on: Parameters<typeof world>[0], $: Engine) => lentOnTwo(on, $, w => (w.lendsSignIn = false))
 
 test('where Claude Code lends plugins no sign-in, an idle session whose switch shows as made asks for no usage of its own: the routine check is the next to ask', async ($, on) => {
   const { w, clock } = await unlentOnTwo(on, $)
@@ -1064,16 +1032,8 @@ test('where Claude Code lends plugins no sign-in, a session that sent a request 
 })
 
 test('a check that gets no answer as a switch should be given up is not the last: the next minute\'s check finds it did not take', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [93, 40]
-  w.usage['tok-2'] = [10, 30]
-  const owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
-  w.owners = owners
-  w.isCacheStuck = true
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
+  const { w, clock } = await lentOnTwo(on, $, world => (world.isCacheStuck = true))
+  const { owners } = w
   await clock.advance(36_000)
   // A request goes out, still as login 1, and the session idles.
   await request($, clock)
@@ -1091,16 +1051,7 @@ test('a check that gets no answer as a switch should be given up is not the last
 })
 
 test('a request that only just set out is no test of a switch yet: the minute\'s check a moment later gives nothing up, and the one after does', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [93, 40]
-  w.usage['tok-2'] = [10, 30]
-  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
-  w.isCacheStuck = true
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  expect(slots(w)).toEqual([SLOT2])
+  const { w, clock } = await lentOnTwo(on, $, world => (world.isCacheStuck = true))
   // Idle for minutes; the first prompt's request sets out two seconds before the minute's check.
   await clock.advance(5 * 60_000 - 2_000)
   await request($, clock)

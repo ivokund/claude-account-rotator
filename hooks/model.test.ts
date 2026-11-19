@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
+import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, nextReset, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -143,6 +143,23 @@ test('a Fable session leaves at 95% of the Fable week and picks by the smaller r
   expect(roomOf(readings['2'], NOW)).toBe(90)
   // With a 5-hour window, the smaller of what it can serve now and the Fable week.
   expect(roomOf({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 30, resetsAt: WEEK_END }, models: fable(70), at: NOW }, NOW, 'Fable')).toBe(30)
+})
+
+test('the next account frees up once the last of its spent windows resets: a window with room, soon as it resets, frees nothing', () => {
+  // Both spent by the week; their 5-hour windows, a third used, reset in two hours.
+  expect(nextReset(view({ '1': [30, 96], '2': [20, 97] }), NOW)).toBe(Date.parse(WEEK_END))
+  // Spent by the 5-hour window alone: that one's reset.
+  expect(nextReset(view({ '1': [95, 50], '2': [91, 10] }), NOW)).toBe(Date.parse(LATER))
+  // An account with both windows spent frees up at the later reset; another's sooner one is the next.
+  expect(nextReset(view({ '1': [95, 96] }), NOW)).toBe(Date.parse(WEEK_END))
+  expect(nextReset(view({ '1': [95, 96], '2': [91, 10] }), NOW)).toBe(Date.parse(LATER))
+  // A Fable session's Fable week counts, for it alone; nothing spent, nothing to wait for.
+  const v = view({ '1': [30, 50] })
+  const fable: View = { ...v, readings: { '1': { ...v.readings['1'], models: { Fable: { pct: 96, resetsAt: WEEK_END } }, at: NOW } }, model: 'claude-fable-5-2' }
+  expect(nextReset(fable, NOW)).toBe(Date.parse(WEEK_END))
+  expect(nextReset({ ...fable, model: 'claude-opus-5-5' }, NOW)).toBeUndefined()
+  // A spent window that doesn't say when it resets: unknown.
+  expect(nextReset({ ...v, readings: { '1': { fiveHour: { pct: 95 }, at: NOW } } }, NOW)).toBeUndefined()
 })
 
 test('a turn on Fable that hits a limit fills the Fable week where it is the fullest window, else the window that limits the login', () => {

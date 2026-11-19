@@ -267,14 +267,23 @@ export function pickStart(view: View, now: number, claims: Readonly<Record<strin
   return fresh.sort((a, b) => (reset(a) === reset(b) ? room(b) - room(a) : reset(a) < reset(b) ? -1 : 1))[0]
 }
 
-/** When the soonest spent window among all logins resets, epoch ms; the session's model week counts too. */
+/**
+ * When the first of the spent logins frees up, epoch ms: each once the last
+ * of its spent windows has reset, the session's model week among them. A
+ * window with room frees nothing, soon as it may reset. Undefined with none
+ * spent, or none whose spent windows all say when they reset.
+ */
 export function nextReset(view: View, now: number): number | undefined {
   const scope = viewScope(view)
   const times = view.accounts.flatMap(a => {
     const r = view.readings[a.id]
-    return [r?.fiveHour, r?.sevenDay, modelWindow(r, scope)]
-      .filter((w): w is UsageWindow => w !== undefined && w.resetsAt !== undefined && (windowPct(w, now) ?? 0) > 0)
-      .map(w => Date.parse(w.resetsAt ?? ''))
+    const windows: [UsageWindow | undefined, number][] = [
+      [r?.fiveHour, LEAVE_FIVE_HOUR],
+      [r?.sevenDay, LEAVE_SEVEN_DAY],
+      [modelWindow(r, scope), LEAVE_SEVEN_DAY],
+    ]
+    const resets = windows.filter(([w, leave]) => (windowPct(w, now) ?? 0) >= leave).map(([w]) => Date.parse(w?.resetsAt ?? ''))
+    return resets.length === 0 || resets.some(at => !Number.isFinite(at)) ? [] : [Math.max(...resets)]
   })
   return times.length === 0 ? undefined : Math.min(...times)
 }

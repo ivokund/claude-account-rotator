@@ -701,7 +701,14 @@ async function switchTo($: Host, target: Account, why: string, { isQuiet = false
   await setView($, v => ({
     ...v,
     activeId: target.id,
-    pending: { id: target.id, from: v.activeId, since: now, ...(isQuiet ? {} : { why }), ...(isPicked ? { isPicked } : {}) },
+    pending: {
+      id: target.id,
+      // Over a switch no request has tested, the session's requests still go out as the login before that one: the login a switch that does not take goes back to. Connect's own moves keep theirs.
+      from: v.pending !== undefined && !isTried(v.pending) && !isConnectingChrome ? v.pending.from : v.activeId,
+      since: now,
+      ...(isQuiet ? {} : { why }),
+      ...(isPicked ? { isPicked } : {}),
+    },
     removing: undefined,
   }))
   watchSwitch($, now)

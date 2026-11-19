@@ -1233,6 +1233,78 @@ test('an idle session moved on over a switch no request tested, the new switch n
   expect(slots(w)).toEqual([SLOT2, SLOT3, ''])
 })
 
+test('where Claude Code lends plugins no sign-in, an idle session moved on over a switch no request tested, neither taking: it goes back to the login its responses still come from', async ($, on) => {
+  const { w, clock } = await movedToTwo(on, $, world => (world.lendsSignIn = false))
+  await clock.advance(36_000)
+  w.usage['tok-2'] = [99, 30]
+  await clock.advance(10 * 60_000)
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  // Minutes on, the first prompt: its response reports login 1's usage, as no switch ever took.
+  await clock.advance(5 * 60_000)
+  await request($, clock)
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(w.toasts.filter(t => /switch to Claude account 3 did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /has not shown/.test(t))).toEqual([])
+  expect(slots(w)).toEqual([SLOT2, SLOT3, ''])
+})
+
+test('where Claude Code lends plugins no sign-in, a switch made over one a request has tested leaves the login that one moved to: not taking, the session goes back there', async ($, on) => {
+  const { w, clock } = await movedToTwo(on, $, world => (world.lendsSignIn = false))
+  await clock.advance(36_000)
+  // A request goes out, as login 2 by now; before any response confirms it, Use now picks login 3.
+  await request($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-3' })
+  await clock.settle()
+  await pane.unmount()
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  // Minutes on a response still reports login 2's usage: the switch to login 3 did not take.
+  await clock.advance(5 * 60_000)
+  await request($, clock)
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 10, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 30, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(w.toasts.filter(t => /switch to Claude account 3 did not take: responses still use account 2/.test(t))).toHaveLength(1)
+  expect(slots(w)).toEqual([SLOT2, SLOT3, SLOT2])
+})
+
+test('Connect\'s visit, made over a switch no request tested, leaves the login the session showed in use: a turn cut short just then is checked against that one', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '1' })
+  await start($, clock)
+  // On the extension's account, the session connects with no visit; then Use now moves it to login 2, shown as made with no request.
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await clock.advance(36_000)
+  await pane.unmount()
+  expect(slots(w)).toEqual([SLOT2])
+  // The connection drops, and a browser call finds none: Connect visits login 1.
+  w.chrome.as = SLOT2
+  await browse($, 'navigate')
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2, ''])
+  // A turn dies on a limit seconds into the visit: the login left is asked about first, then the one visited.
+  w.usage['tok-2'] = [100, 30]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(w.usageAsked.slice(-2)).toEqual(['tok-2', 'tok-1'])
+})
+
 test('an account picked with Use now, low as it is, stays an idle session\'s until a request confirms it: the rotation moves on only then', async ($, on) => {
   const { w, clock } = await threeKnown(on, [[20, 30], [95, 30], [10, 30]])
   await start($, clock)

@@ -107,7 +107,8 @@ export type View = {
   /**
    * Set after a switch until Claude Code is seen sending the new login's
    * sign-in: meanwhile the footer blinks its in-use mark, and the pane says
-   * switching. `why` the switch was made, told in a toast once it lands; none
+   * switching. `from`: the login the session's requests went out as before,
+   * as far as the mod knows; over a switch no request tested, the one before. `why` the switch was made, told in a toast once it lands; none
    * for a quiet one, as Claude in Chrome's visits are, or once told. `isDue`:
    * SETTLE_MS on, with no request since to show it, so the next request reads
    * the new sign-in: it shows switched, and the first request after confirms it.

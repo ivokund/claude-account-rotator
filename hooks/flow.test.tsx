@@ -2119,9 +2119,21 @@ test('with a fresh 5-hour window picked, a new session moves where one hasn\'t s
 test('with a fresh 5-hour window picked, a new session passes over the account another new session started on minutes ago', async ($, on) => {
   const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
   // Account 2's usage doesn't show the other window's start yet: its claim does.
-  const clock = world(on, w, { ...store, 'start-on': 'fresh', 'start-claims': { '2': NOW - 60_000 } })
+  const shared: Record<string, unknown> = {}
+  w.shared = shared
+  const clock = world(on, w, { ...store, 'start-on': 'fresh', 'start-claim:2': NOW - 60_000 })
   await start($, clock)
   expect(slots(w)).toEqual([SLOT3])
+  // Its own claim goes under account 3's key: the one on account 2 stays as the other window made it.
+  expect(shared['start-claim:3']).toBe(NOW)
+  expect(shared['start-claim:2']).toBe(NOW - 60_000)
+})
+
+test('with a fresh 5-hour window picked, a claim made more than ten minutes ago holds no new session back: by then usage shows a window that started', async ($, on) => {
+  const { w, store } = await threeLogins({ '1': [30, 40, LATER_WEEK], '2': [0, 10, SOON], '3': [0, 20, LATER_WEEK] })
+  const clock = world(on, w, { ...store, 'start-on': 'fresh', 'start-claim:2': NOW - 11 * 60_000 })
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
 })
 
 test('with a fresh 5-hour window picked, a reload of the mod leaves a session at work where it is: only a window opening starts elsewhere', async ($, on) => {

@@ -18,7 +18,6 @@ import {
   EMPTY_VIEW,
   LEAVE_FIVE_HOUR,
   LEAVE_SEVEN_DAY,
-  START_CLAIM_MS,
   blockedText,
   browsersFrom,
   canConnectChrome,
@@ -274,19 +273,27 @@ async function setStartOn($: Host, startOn: StartOn): Promise<void> {
 }
 
 /**
+ * Where a new session's claim on the login it starts on is kept: when it was
+ * made, under a key of the login's own, as readings are, so sessions claiming
+ * different logins never write over each other. Two that open in the same
+ * instant may still claim the same one: the store has no lock.
+ */
+const claimKey = (id: string) => `start-claim:${id}`
+
+/**
  * Where this new session starts, with "a fresh 5-hour window" picked: the
  * login pickStart picks, claimed so the next new session starts elsewhere.
  */
 async function startPick($: Host): Promise<Account | undefined> {
   const view = await getView($)
   const now = await $.clock.now()
-  const stored = await $.store.get('start-claims')
   const claims: Record<string, number> = {}
-  for (const [id, at] of Object.entries(typeof stored === 'object' && stored !== null ? stored : {})) {
-    if (typeof at === 'number' && now - at < START_CLAIM_MS) claims[id] = at
+  for (const a of view.accounts) {
+    const at = await $.store.get(claimKey(a.id))
+    if (typeof at === 'number') claims[a.id] = at
   }
   const pick = pickStart(view, now, claims)
-  if (pick !== undefined) await $.store.set('start-claims', { ...claims, [pick.id]: now })
+  if (pick !== undefined) await $.store.set(claimKey(pick.id), now)
   return pick
 }
 
@@ -1257,6 +1264,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
   await $.store.delete(`usage:${id}`)
+  await $.store.delete(claimKey(id))
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
   await setView($, v => {

@@ -145,12 +145,20 @@ test('a Fable session leaves at 95% of the Fable week and picks by the smaller r
   expect(roomOf({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 30, resetsAt: WEEK_END }, models: fable(70), at: NOW }, NOW, 'Fable')).toBe(30)
 })
 
-test('a turn on Fable that hits a limit fills the Fable week where it is the fuller window, else the window that limits the login', () => {
-  const r = { sevenDay: { pct: 80, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, at: NOW }
-  expect(spentReading(r, NOW, 'Fable')).toEqual({ sevenDay: { pct: 80, resetsAt: WEEK_END }, models: { Fable: { pct: 100, resetsAt: WEEK_END } }, at: NOW })
-  expect(spentReading(r, NOW)).toEqual({ sevenDay: { pct: 100, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, at: NOW })
+test('a turn on Fable that hits a limit fills the Fable week where it is the fullest window, else the window that limits the login', () => {
+  const r = { sevenDay: { pct: 80, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, usageAt: NOW - 60_000, at: NOW - 1 }
+  // Noted as a usage check's answer is, so a response another session reports doesn't put the older week back.
+  expect(spentReading(r, NOW, 'Fable')).toEqual({ sevenDay: { pct: 80, resetsAt: WEEK_END }, models: { Fable: { pct: 100, resetsAt: WEEK_END } }, usageAt: NOW, at: NOW })
+  expect(spentReading(r, NOW)).toEqual({ sevenDay: { pct: 100, resetsAt: WEEK_END }, models: { Fable: { pct: 96, resetsAt: WEEK_END } }, usageAt: NOW - 60_000, at: NOW })
   const five = { fiveHour: { pct: 85, resetsAt: LATER }, sevenDay: { pct: 30, resetsAt: WEEK_END }, models: { Fable: { pct: 40, resetsAt: WEEK_END } }, at: NOW }
   expect(spentReading(five, NOW, 'Fable')).toEqual({ ...five, fiveHour: { pct: 100, resetsAt: LATER } })
+  // The week fuller than the Fable week: the turn more likely ran out of week, which sessions on other models must see too.
+  const week = { fiveHour: { pct: 20, resetsAt: LATER }, sevenDay: { pct: 94, resetsAt: WEEK_END }, models: { Fable: { pct: 30, resetsAt: WEEK_END } }, at: NOW }
+  expect(spentReading(week, NOW, 'Fable')).toEqual({ ...week, fiveHour: { pct: 100, resetsAt: LATER } })
+  expect(isSpent(spentReading(week, NOW, 'Fable'), NOW)).toBe(true)
+  // Level, as all are once the windows reset: no reason to single the Fable week out.
+  const level = { fiveHour: { pct: 0 }, sevenDay: { pct: 0, resetsAt: WEEK_END }, models: { Fable: { pct: 0, resetsAt: WEEK_END } }, at: NOW }
+  expect(spentReading(level, NOW, 'Fable')).toEqual({ ...level, fiveHour: { pct: 100 } })
 })
 
 test('a new session starts where a 5-hour window hasn\'t started: Claude Code\'s login if it qualifies, else the week resetting soonest; claimed, short of week, or locked ones are passed over', () => {

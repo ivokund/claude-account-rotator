@@ -185,15 +185,19 @@ function limitReset(r: Reading | undefined, now: number): number {
 
 /**
  * A login's reading once a turn hit its usage limit before its usage showed
- * it: the window that limits it, full. For a session on a model with a week of
- * its own, that week instead where it is the fuller of the two: the turn more
- * likely hit it.
+ * it: the window that limits it, full, which every session sees. For a
+ * session on a model with a week of its own, that week instead, but only
+ * where it is fuller than both the 5-hour window and the week: then the turn
+ * more likely hit it, and sessions on other models still have the login's
+ * room. Noted as the usage endpoint's answers are (`usageAt`), so a response
+ * another session reports for the login doesn't undo it.
  */
 export function spentReading(r: Reading | undefined, now: number, scope?: string): Reading {
   const key = limitingWindow(r)
   const model = modelWindow(r, scope)
-  if (scope !== undefined && model !== undefined && (windowPct(model, now) ?? 0) >= (windowPct(r?.[key], now) ?? 0)) {
-    return { ...r, models: { ...r?.models, [scope]: { pct: 100, ...(model.resetsAt ? { resetsAt: model.resetsAt } : {}) } }, at: now }
+  const used = (w: UsageWindow | undefined) => windowPct(w, now) ?? 0
+  if (scope !== undefined && model !== undefined && used(model) > Math.max(used(r?.fiveHour), used(r?.sevenDay))) {
+    return { ...r, models: { ...r?.models, [scope]: { pct: 100, ...(model.resetsAt ? { resetsAt: model.resetsAt } : {}) } }, usageAt: now, at: now }
   }
   const resetsAt = r?.[key]?.resetsAt
   return { ...r, [key]: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now }

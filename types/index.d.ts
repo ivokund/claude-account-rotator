@@ -1,12 +1,12 @@
 /** One usage window of a login: percent used, and when it resets (ISO 8601). */
 export type UsageWindow = { pct: number; resetsAt?: string }
 
-/** A login's usage as last read, `at` in epoch milliseconds. */
 /**
- * `models`: a model family's own week, by its display name ("Fable"), inside
- * the login's week. `usageAt`: when the usage endpoint last answered for the
- * login, which alone reports `models`: a response's report since, taken `at`,
- * keeps them as read then.
+ * A login's usage as last read, `at` in epoch milliseconds. `models`: a model
+ * family's own week, by its display name ("Fable"), inside the login's week.
+ * `usageAt`: when the usage endpoint last answered for the login, which alone
+ * reports `models` (or when a limit hit marked one of them full): a response's
+ * report since, taken `at`, keeps them as read then.
  */
 export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; models?: Record<string, UsageWindow>; usageAt?: number; at: number }
 

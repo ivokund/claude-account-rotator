@@ -2308,8 +2308,23 @@ test('the pane says how old a reading is once it is older than 20 minutes, and w
   const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': old })
   await start($, clock)
   const pane = await mountPane($)
-  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/read 2h 0m ago, when a session last used it; read again once one does$/)
+  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/read 2h 0m ago; read again once a session uses the account$/)
   expect((await pane.find({ key: 'account-1' }))?.text).not.toMatch(/read .* ago/)
+  await pane.unmount()
+})
+
+test('a Fable week older than the reading it sits in says its own age: responses keep the week current, never the Fable week', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 24 * HOUR)
+  w.usage['tok-1'] = [20, 30]
+  // Anthropic rate limits the usage checks, so nothing reads the Fable week again; a response reported the rest a minute ago.
+  w.isUsageLimited = true
+  const week = { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }
+  const reading = { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: week, models: { Fable: week }, usageAt: NOW - 25 * 60_000, at: NOW - 60_000 }
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'reading:1': reading })
+  await start($, clock)
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/Fable read 25m ago$/)
   await pane.unmount()
 })
 

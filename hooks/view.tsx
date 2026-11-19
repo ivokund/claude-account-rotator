@@ -6,8 +6,6 @@ import {
   LEAVE_FIVE_HOUR,
   LEAVE_SEVEN_DAY,
   SIGN_IN_WARN_MS,
-  READING_OLD_MS,
-  agoText,
   availableNow,
   blockedAdvice,
   canConnectChrome,
@@ -19,6 +17,7 @@ import {
   modelWindow,
   nextReset,
   planText,
+  readingAge,
   restartSteps,
   roomColor,
   roomLeft,
@@ -547,7 +546,7 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   return undefined
 }
 
-/** A window's name column: "5h", "week", or a model's own week ("Fable"), and a space. */
+/** A window's name column at its narrowest: "5h", "week" or a model's own week ("Fable"), and a space. A longer name widens it. */
 const WINDOW_NAME_WIDTH = 6
 
 /** A window's bar and percent at their widest ("▰▰▰▰▰▰▰▰▰▰ 100% left"), so the reset times line up. */
@@ -559,12 +558,12 @@ const BAR_WIDTH = 20
  * reports no such window (a Team seat's week) says so, as does one that has
  * reset since its reading, which says nothing of what was used since.
  */
-function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReading: boolean, w: UsageWindow | undefined, now: number) {
+function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, nameWidth: number, hasReading: boolean, w: UsageWindow | undefined, now: number) {
   const { Box, Text } = ui
   const left = roomLeft(w, now)
   return (
     <Box flexDirection="row" marginLeft={3}>
-      <Box width={WINDOW_NAME_WIDTH} flexShrink={0}>
+      <Box width={nameWidth} flexShrink={0}>
         <Text dimColor={!isActive}>{name}</Text>
       </Box>
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
@@ -655,6 +654,10 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
     ...(a.orgName === undefined ? [] : [a.plan ? `${a.orgName} · ${a.plan}` : a.orgName]),
     ...(view.chromeAccountId === a.id ? ['Chrome'] : []),
   ]
+  // A model with a week of its own (Fable): its sessions also move on once it is spent.
+  const models = Object.keys(r?.models ?? {}).sort()
+  const nameWidth = Math.max(WINDOW_NAME_WIDTH, ...models.map(name => name.length + 1))
+  const age = readingAge(r, view.idle?.includes(a.id) === true, now)
   return (
     <Box key={`account-${a.id}`} flexDirection="column" marginBottom={1}>
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
@@ -671,17 +674,14 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
           {lineEnd(ui, view, a, act)}
         </Box>
       </Box>
-      {windowRow(ui, view.footer.fill, isActive, '5h', r !== undefined, r?.fiveHour, now)}
-      {windowRow(ui, view.footer.fill, isActive, 'week', r !== undefined, r?.sevenDay, now)}
-      {/* A model with a week of its own (Fable): its sessions also move on once it is spent. */}
-      {Object.keys(r?.models ?? {})
-        .sort()
-        .map(name => (
-          <Box key={`model-${name}`}>{windowRow(ui, view.footer.fill, isActive, name, true, r?.models?.[name], now)}</Box>
-        ))}
-      {r !== undefined && now - r.at > READING_OLD_MS && (
+      {windowRow(ui, view.footer.fill, isActive, '5h', nameWidth, r !== undefined, r?.fiveHour, now)}
+      {windowRow(ui, view.footer.fill, isActive, 'week', nameWidth, r !== undefined, r?.sevenDay, now)}
+      {models.map(name => (
+        <Box key={`model-${name}`}>{windowRow(ui, view.footer.fill, isActive, name, nameWidth, true, r?.models?.[name], now)}</Box>
+      ))}
+      {age !== undefined && (
         <Text key="read-at" dimColor>
-          {`   read ${agoText(r.at, now)}${view.idle?.includes(a.id) ? ', when a session last used it; read again once one does' : ''}`}
+          {`   ${age}`}
         </Text>
       )}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (

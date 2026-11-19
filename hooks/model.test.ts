@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, nextReset, pickStart, pickTarget, pie, roomOf, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, startWhy, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
+import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, nextReset, pickStart, pickTarget, pie, roomOf, readingAge, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, startWhy, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -237,6 +237,20 @@ test('a new session\'s move says what its reading tells: how old, where it isn\'
   expect(startWhy({ fiveHour: { pct: 0 }, at: NOW - 125 * 60_000 }, NOW)).toBe("its 5-hour window hadn't started when read 2h 5m ago")
   // Read while a window ran that has ended since: what the account did after is not known.
   expect(startWhy({ fiveHour: { pct: 60, resetsAt: LATER }, at }, Date.parse(LATER) + 60_000)).toBe('its 5-hour window had reset since it was read 2h 2m ago')
+})
+
+test('a reading says its age once it is old, and of its Fable week alone where responses keep the rest current', () => {
+  const week = { pct: 40, resetsAt: WEEK_END }
+  expect(readingAge(undefined, false, NOW)).toBeUndefined()
+  expect(readingAge({ sevenDay: week, at: NOW - 19 * 60_000 }, false, NOW)).toBeUndefined()
+  expect(readingAge({ sevenDay: week, at: NOW - 25 * 60_000 }, false, NOW)).toBe('read 25m ago')
+  // An idle account's: what is known is when it was read, not when a session last used it.
+  expect(readingAge({ sevenDay: week, at: NOW - 2 * 3600_000 }, true, NOW)).toBe('read 2h 0m ago; read again once a session uses the account')
+  // In use while Anthropic rate limits the usage checks: responses report the week, and the Fable week stays as read.
+  const fable = { Fable: { pct: 60, resetsAt: WEEK_END } }
+  expect(readingAge({ sevenDay: week, models: fable, usageAt: NOW - 40 * 60_000, at: NOW - 5_000 }, false, NOW)).toBe('Fable read 40m ago')
+  expect(readingAge({ sevenDay: week, models: fable, usageAt: NOW - 60_000, at: NOW - 5_000 }, false, NOW)).toBeUndefined()
+  expect(readingAge({ sevenDay: week, usageAt: NOW - 40 * 60_000, at: NOW - 5_000 }, false, NOW)).toBeUndefined()
 })
 
 test('says how long ago, in minutes, hours or days', () => {

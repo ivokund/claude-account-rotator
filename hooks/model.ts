@@ -496,13 +496,33 @@ export function longBar(pct: number | undefined): string {
   return '▰'.repeat(full) + '▱'.repeat(10 - full)
 }
 
+/** "40m", "2h 5m", "3d 4h": a span of time, to the minute. */
+function spanText(ms: number): string {
+  const minutes = Math.max(0, Math.round(ms / 60_000))
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ${minutes % 60}m`
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`
+}
+
 /** "40m ago", "2h 5m ago": how long ago, relative as untilText is. */
 export function agoText(at: number, now: number): string {
-  const minutes = Math.max(0, Math.round((now - at) / 60_000))
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ${minutes % 60}m ago`
-  return `${Math.floor(hours / 24)}d ${hours % 24}h ago`
+  return `${spanText(now - at)} ago`
+}
+
+/**
+ * What the pane says of a reading's age once it is old, undefined while it is
+ * current. An idle login's, whose token has run out so that its usage can't
+ * be read, says when it is read again. Where responses keep the reading
+ * current but its model weeks, which only the usage endpoint tells, are old,
+ * it says so of those.
+ */
+export function readingAge(r: Reading | undefined, isIdle: boolean, now: number): string | undefined {
+  if (r === undefined) return undefined
+  if (now - r.at > READING_OLD_MS) return `read ${agoText(r.at, now)}${isIdle ? '; read again once a session uses the account' : ''}`
+  const models = Object.keys(r.models ?? {}).sort()
+  const isOld = models.length > 0 && r.usageAt !== undefined && now - r.usageAt > READING_OLD_MS
+  return isOld && r.usageAt !== undefined ? `${models.join(', ')} read ${agoText(r.usageAt, now)}` : undefined
 }
 
 /** "in 1h 20m", "in 3d 4h": relative, so it needs no time zone. */
@@ -510,12 +530,7 @@ export function untilText(at: number | string | undefined, now: number): string 
   if (at === undefined) return ''
   const ms = (typeof at === 'string' ? Date.parse(at) : at) - now
   if (!Number.isFinite(ms)) return ''
-  if (ms <= 0) return 'now'
-  const minutes = Math.round(ms / 60_000)
-  if (minutes < 60) return `in ${minutes}m`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `in ${hours}h ${minutes % 60}m`
-  return `in ${Math.floor(hours / 24)}d ${hours % 24}h`
+  return ms <= 0 ? 'now' : `in ${spanText(ms)}`
 }
 
 export function label(account: Account | undefined): string {

@@ -74,9 +74,11 @@ const SETTLE_MS = 35_000
 const CONFIRM_GIVE_UP_MS = 4 * 60_000
 /** A beat of the in-use mark's blink while a switch is not yet seen to land: lit one beat, unlit the next. */
 const BLINK_MS = 500
-/** How often a switch asks who the session's sign-in is, for its first CONFIRM_POLL_FOR_MS; the minute's timer asks after. */
+/** How often a switch asks who the session's sign-in is, for its first CONFIRM_POLL_FOR_MS; the minute's timer asks after, while a verdict can still come. */
 const CONFIRM_POLL_MS = 5_000
 const CONFIRM_POLL_FOR_MS = SETTLE_MS + 15_000
+/** How long after a request a verdict on the switch it tests is waited for: a switch is given up CONFIRM_GIVE_UP_MS on, at the minute's check. */
+const AWAIT_MS = CONFIRM_GIVE_UP_MS + 60_000
 /** A reading this fresh, from any session, is not asked for again by the routine check: every session asking every login piles up. */
 const USAGE_FRESH_MS = 5 * 60_000
 /** After Anthropic rate limits a usage check, how long every session leaves the usage endpoint be, at least. */
@@ -760,10 +762,13 @@ async function settleOnce($: Host, isResponse: boolean): Promise<void> {
  * confirms it. Where the session's sign-in can't be asked about, the latest
  * response's usage tells, once SETTLE_MS has passed; then only a response to
  * such a request, still answered by the old login minutes later, is reported.
+ * The minute's check asks only while a verdict can still come: an idle
+ * session's switch, shown as made, has nothing new to tell until a request.
  */
 async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const { pending, accounts } = await getView($)
   if (pending === undefined) return
+  if (!isResponse && !isAwaited(pending, await $.clock.now())) return
   // Before asking: a request that goes out while the answer is on its way was not read for yet.
   const hasRequested = isTried(pending)
   const live = await liveAccount($)
@@ -778,7 +783,8 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   if (now - pending.since < SETTLE_MS) return
   const reading = readingFromLimits((await $.session.usage()).rateLimits, now)
   const target = accounts.find(a => a.id === pending.id)
-  if (target !== undefined) await checkAccount($, target, true)
+  // Only a response changes what the session's usage says: a check on the minute takes a reading any session took lately. The one that shows the switch as made asks.
+  if (target !== undefined) await checkAccount($, target, isResponse || pending.isDue !== true)
   if (sameUsage(reading, (await getView($)).readings[pending.id], now)) {
     await confirmPending($, pending)
   } else if (isResponse && isLate && hasRequested) {
@@ -799,6 +805,14 @@ const isStill = (v: View, pending: Pending) => v.pending?.id === pending.id && v
  * sign-in again before it, so what follows tells whether the switch took.
  */
 const isTried = (pending: Pending) => lastRequestAt !== undefined && lastRequestAt >= pending.since + SETTLE_MS
+
+/**
+ * Whether a verdict on `pending` may still come: until it shows as made, and
+ * for minutes after a request that tests it. Past that the session idles on
+ * the new login, as far as anyone can tell, until its next request.
+ */
+const isAwaited = (pending: Pending, now: number) =>
+  pending.isDue !== true || (isTried(pending) && lastRequestAt !== undefined && now - lastRequestAt <= AWAIT_MS)
 
 /** Says, unless the switch was quiet or it was said already, that the session switched. */
 function toastSwitched($: Host, view: View, pending: Pending): void {

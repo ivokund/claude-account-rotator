@@ -69,6 +69,8 @@ type World = {
   retryAfter?: string
   /** The tokens the usage endpoint was asked about, in order. */
   usageAsked: string[]
+  /** How many times the session's own sign-in was asked whom it belongs to (the profile endpoint, with its handle). */
+  sessionAsks: number
   /**
    * Holds open each ask whose sign-in the session's is (the profile endpoint,
    * with its handle), read as the ask is made: `arrived` is called once one
@@ -167,6 +169,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     const own = e.init?.auth === 'session-sign-in' ? credentialFrom(w.keychain[await keychainItem(heldSlot())] ?? '')?.accessToken : undefined
     const token = own ?? (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
     if (e.url === 'https://api.anthropic.com/api/oauth/profile') {
+      if (e.init?.auth === 'session-sign-in') w.sessionAsks += 1
       if (own !== undefined && w.profileGate !== undefined) {
         w.profileGate.arrived()
         await w.profileGate.open
@@ -288,6 +291,7 @@ const fresh = (system: World['system'] = 'macOS'): World => ({
   chromeAsked: [],
   commands: [],
   usageAsked: [],
+  sessionAsks: 0,
 })
 const TWO_LOGINS ={ accounts: [{ id: '1', slot: '', email: 'one@example.com' }, { id: '2', slot: SLOT2, email: 'two@example.com' }] }
 
@@ -930,6 +934,107 @@ test('a prompt sent while the mod is asking whose sign-in the session holds is n
   expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/● in use/)
   expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
   await pane.unmount()
+})
+
+test('an idle session whose switch shows as made asks no more whose sign-in it holds; once a request has gone out the minute\'s check asks, and confirms the switch', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  // 35 s on, with no request, the switch shows as made, and is told.
+  await clock.advance(36_000)
+  expect(w.toasts.filter(t => /^Switched to Claude account 2/.test(t))).toHaveLength(1)
+  const asked = w.sessionAsks
+  expect(asked).toBeGreaterThan(0)
+  // Nine idle minutes: only a request makes Claude Code read the sign-in again, so there is nothing new to ask, and nowhere to move.
+  await clock.advance(9 * 60_000)
+  expect(w.sessionAsks).toBe(asked)
+  expect(slots(w)).toEqual([SLOT2])
+  // A request goes out, as login 2: the next minute's check asks, and finds the switch made.
+  await request($, clock)
+  expect(w.sessionAsks).toBe(asked)
+  await clock.advance(60_000)
+  expect(w.sessionAsks).toBe(asked + 1)
+  await clock.advance(5 * 60_000)
+  expect(w.sessionAsks).toBe(asked + 1)
+  expect(w.toasts.filter(t => /^Switched to Claude account 2/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /did not take|has not shown/.test(t))).toEqual([])
+})
+
+/** How often the usage endpoint was asked about login 2. */
+const askedOfTwo = (w: World) => w.usageAsked.filter(token => token === 'tok-2').length
+
+/** Two logins where Claude Code lends plugins no sign-in; the session starts on login 1, which is spent, and moves to login 2. No response says anything yet. */
+async function unlentOnTwo(on: Parameters<typeof world>[0], $: Engine): Promise<{ w: World; clock: MockClock }> {
+  const w = fresh()
+  w.lendsSignIn = false
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  return { w, clock }
+}
+
+test('where Claude Code lends plugins no sign-in, an idle session whose switch shows as made asks for no usage of its own: the routine check is the next to ask', async ($, on) => {
+  const { w, clock } = await unlentOnTwo(on, $)
+  await clock.advance(36_000)
+  const asked = askedOfTwo(w)
+  // Up to the routine check at ten minutes, a reading over five minutes old and all.
+  await clock.advance(9 * 60_000 + 20_000)
+  expect(askedOfTwo(w)).toBe(asked)
+  await clock.advance(10_000)
+  expect(askedOfTwo(w)).toBe(asked + 1)
+})
+
+test('where Claude Code lends plugins no sign-in, the check that shows a switch as made asks for the new login\'s usage afresh: a response it answered meanwhile confirms the switch', async ($, on) => {
+  const { w, clock } = await unlentOnTwo(on, $)
+  // A request 31 s on reads login 2's sign-in, and its response reports login 2's usage, more than was read as the session opened.
+  await clock.advance(31_000)
+  await request($, clock)
+  w.usage['tok-2'] = [20, 30]
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 20, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 30, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  const asked = askedOfTwo(w)
+  await clock.advance(5_000)
+  expect(askedOfTwo(w)).toBe(asked + 1)
+  // Confirmed: the next response's usage is login 2's own, with no check first.
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 30, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(askedOfTwo(w)).toBe(asked + 1)
+  const pane = await mountPane($)
+  expect(await pane.find({ text: /^▰{7}▱{3} 70% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('where Claude Code lends plugins no sign-in, a session that sent a request and then idles asks for no fresh usage on the minute, and five minutes on asks nothing at all', async ($, on) => {
+  const { w, clock } = await unlentOnTwo(on, $)
+  await clock.advance(36_000)
+  // A request goes out; no response says whether the switch took.
+  await request($, clock)
+  const asked = askedOfTwo(w)
+  // The minute's checks compare with the reading taken as the switch showed as made: under five minutes old, it is not asked for again.
+  await clock.advance(4 * 60_000 + 20_000)
+  expect(askedOfTwo(w)).toBe(asked)
+  // Five minutes after the request no verdict is waited for: the reading grows old, and the minute's checks leave it be.
+  await clock.advance(5 * 60_000 - 1_000)
+  expect(askedOfTwo(w)).toBe(asked)
+  expect(slots(w)).toEqual([SLOT2])
 })
 
 test('a reading from before its window reset says nothing of the usage since: the footer draws it unknown, not empty, and the pane says it reset', async ($, on) => {

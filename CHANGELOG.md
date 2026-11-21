@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **Each `CLAUDE_CONFIG_DIR` keeps its own accounts.** With the mod installed in two Claude homes, say `~/.claude` and one started with `CLAUDE_CONFIG_DIR=~/.claude-work`, both put added accounts in `~/.claude/accounts/<n>`. Account 2 of one home was account 2 of the other: signing it in from one home signed in the other's, and **Remove** in one signed the other's out. Added accounts now go in the `accounts` folder of the session's own config directory. Accounts added before keep the folder they have.
+- **A home started with `CLAUDE_CONFIG_DIR` reads its own login.** The mod read account 1, Claude Code's login, from `~/.claude` whatever the session's config directory, while Claude Code read it from that directory. So the panel named the `~/.claude` login and showed the usage of the login really in use under its name: one account running out showed another as spent too. The mod now reads account 1 where Claude Code does, as do the `claude auth` commands it runs for it. A session Claude Code starts with its secure storage set to its own config directory is on account 1 too, not a new account.
+- **Windows reads the home folder from `USERPROFILE`** where `HOME` isn't set, as Claude Code does.
+
 ## 0.5.1 - 2026-11-20
 
 - **An idle window moves on again when its account runs low.** After a switch, a window with nothing going on shows the new account in use and waits for its next request to confirm it. Until then the rotation left it alone, so a window moved to an account that other windows then used up stayed there, and its next prompt could run into the limit. Now, once readings show that account low, the window moves on like any other. Claude.ai connectors and artifacts follow the account a window sits on, as after any switch. The idea comes from Nathan Broadbent's fork.

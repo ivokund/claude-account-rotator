@@ -90,7 +90,7 @@ Not a fix: a session started on a seat this way still can't switch. It only pick
 CLAUDE_SECURESTORAGE_CONFIG_DIR="$HOME/.claude/accounts/2" claude --continue
 ```
 
-`2` is the account's number in the footer and the panel; plain `claude` starts on account 1, Claude Code's login. Type the path as here, with no `/` at the end and no `~` in quotes: Claude Code and the mod know the account by its exact text, so any other spelling can start signed out, and shows in the panel as a new account. Set it on the command, not with `export`, or every later `claude` in that shell starts there too. Numbers are reused after **Remove**: check the panel before putting one in an alias.
+`2` is the account's number in the footer and the panel; plain `claude` starts on account 1, Claude Code's login. In a Claude home started with `CLAUDE_CONFIG_DIR`, the folder is `accounts/2` in that directory. Type the path as here, with no `/` at the end and no `~` in quotes: Claude Code and the mod know the account by its exact text, so any other spelling can start signed out, and shows in the panel as a new account. Set it on the command, not with `export`, or every later `claude` in that shell starts there too. Numbers are reused after **Remove**: check the panel before putting one in an alias.
 
 Started this way on a personal account, a session rotates as in 1, with your `/login` left a seat.
 
@@ -128,12 +128,12 @@ A window Claude Code stops from switching can connect only as the account it is 
 
 ## How it works
 
-- Each account you add gets a folder, `~/.claude/accounts/<n>`, and Claude Code keeps its sign-in in the keychain under that folder's name (on Linux, in that folder's `.credentials.json`), as for any config folder. A switch points the session at another account's sign-in.
+- Each account you add gets a folder, `~/.claude/accounts/<n>`, or `accounts/<n>` in your `CLAUDE_CONFIG_DIR` when you start Claude with one, so each Claude home keeps accounts of its own. Account 1 is Claude Code's login in that home. Claude Code keeps an added account's sign-in in the keychain under that folder's name (on Linux, in that folder's `.credentials.json`), as for any config folder. A switch points the session at another account's sign-in.
 - Its only network traffic: each account's usage every 10 minutes, from the endpoint `/usage` reads, and once per sign-in who it belongs to, from the one Claude Code asks at a sign-in, each with that account's own token. In a session with Claude in Chrome it also asks Claude Code's own Claude in Chrome which browsers answer, as the session opens, before moving off the extension's account, and on **Use for Chrome**, **Try to connect** and **Connect**. Tokens stay where Claude Code keeps them; the mod stores each account's email, organization, plan and last usage, a digest of its token, to tell a new sign-in, and which account your Chrome extension is signed in to.
 
 ## Uninstall
 
-Remove each account in the panel, which signs it out. Then run `claude plugin marketplace remove claude-account-rotator`, which uninstalls the mod and deletes what it stored, and delete `~/.claude/accounts`.
+Remove each account in the panel, which signs it out. Then run `claude plugin marketplace remove claude-account-rotator`, which uninstalls the mod and deletes what it stored, and delete `~/.claude/accounts` (or `accounts` in your `CLAUDE_CONFIG_DIR`).
 
 ## Terms
 

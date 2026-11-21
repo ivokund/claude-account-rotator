@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, nextReset, pickStart, pickTarget, pie, roomOf, readingAge, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, spentReading, roomColor, startWhy, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
+import { DEFAULT_FOOTER, accountsDir, agoText, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, isUnansweredCall, isSpent, keychainItem, nextReset, pickStart, pickTarget, pie, roomOf, readingAge, readingFromUsage, restartSteps, retryAfter, scopeOf, rotateToFrom, shouldLeave, slotFromEnv, spentReading, roomColor, startWhy, storageDir, stuckText, usageReadAt, windowPct, withModelWeeks } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -353,6 +353,31 @@ test('names credentials files as Claude Code does where there is no keychain', (
   expect(credentialsFile('/home/tester/.claude/accounts/2', undefined)).toBe('/home/tester/.claude/accounts/2/.credentials.json')
   // Claude Code keeps it in the directory's NFC spelling, which Linux tells apart from others.
   expect(credentialsFile('/home/rene\u0301/.claude/accounts/2', undefined)).toBe('/home/ren\u00e9/.claude/accounts/2/.credentials.json')
+})
+
+test('the normal login lives in the session\'s CLAUDE_CONFIG_DIR when one is set, as Claude Code keeps it', async () => {
+  expect(storageDir('', undefined)).toBe('')
+  expect(storageDir('', '')).toBe('')
+  expect(storageDir('', '/home/tester/.claude-work')).toBe('/home/tester/.claude-work')
+  expect(storageDir('/home/tester/.claude/accounts/2', '/home/tester/.claude-work')).toBe('/home/tester/.claude/accounts/2')
+  expect(credentialsFile(storageDir('', '/home/tester/.claude-work'), '/home/tester')).toBe('/home/tester/.claude-work/.credentials.json')
+  expect(await keychainItem(storageDir('', '/Users/tester/.claude/accounts/2'))).toBe(`Claude Code-credentials-${EXPECTED_SLOT2_HASH}`)
+})
+
+test('a session started with its own config directory as the secure storage one is on the normal login', () => {
+  expect(slotFromEnv(undefined, undefined)).toBe('')
+  expect(slotFromEnv('', '/home/tester/.claude-work')).toBe('')
+  expect(slotFromEnv('/home/tester/.claude-work', '/home/tester/.claude-work')).toBe('')
+  expect(slotFromEnv('/home/tester/.claude-work/accounts/2', '/home/tester/.claude-work')).toBe('/home/tester/.claude-work/accounts/2')
+  expect(slotFromEnv('/home/tester/.claude/accounts/2', undefined)).toBe('/home/tester/.claude/accounts/2')
+})
+
+test('each config directory keeps its added accounts in a folder of its own', () => {
+  expect(accountsDir(undefined, '/home/tester')).toBe('/home/tester/.claude/accounts')
+  expect(accountsDir('', '/home/tester')).toBe('/home/tester/.claude/accounts')
+  expect(accountsDir('/home/tester/.claude-work', '/home/tester')).toBe('/home/tester/.claude-work/accounts')
+  expect(accountsDir('C:\\Users\\tester\\.claude-work', undefined)).toBe('C:\\Users\\tester\\.claude-work/accounts')
+  expect(accountsDir(undefined, undefined)).toBeUndefined()
 })
 
 test('room left is colored green with all of it, through yellow, to red with none', () => {

@@ -561,15 +561,41 @@ export async function fingerprint(token: string): Promise<string> {
 
 /**
  * The file Claude Code keeps a slot's login in where there is no keychain
- * (Linux): where 2.1.296 puts it for a `claude` child run with `slotEnv`, the
- * normal login's in ~/.claude and any other slot's in its own directory,
- * NFC-normalized. Undefined for the normal login with no home. A session
- * started with CLAUDE_CONFIG_DIR set keeps its normal login in that directory
- * instead, which this misses as `keychainItem` does on macOS.
+ * (Linux, Windows): where 2.1.296 puts it for a `claude` child run with
+ * `slotEnv`, the normal login's in ~/.claude and any other slot's in its own
+ * directory, NFC-normalized. Undefined for the normal login with no home.
+ * Pass the slot through `storageDir` first, so a session started with
+ * CLAUDE_CONFIG_DIR set reads its normal login from that directory.
  */
 export function credentialsFile(slot: string, home: string | undefined): string | undefined {
   const dir = slot === '' ? home && `${home}/.claude` : slot
   return dir ? `${dir.normalize('NFC')}/.credentials.json` : undefined
+}
+
+/**
+ * Where Claude Code keeps a slot's login, as the directory `keychainItem`,
+ * `credentialsFile` and `slotEnv` take: the normal login lives in the
+ * session's CLAUDE_CONFIG_DIR when one is set, as Claude Code itself pins a
+ * child to its parent's login with `CLAUDE_SECURESTORAGE_CONFIG_DIR ??
+ * CLAUDE_CONFIG_DIR ?? ''`. '' stays the one in ~/.claude.
+ */
+export function storageDir(slot: string, configDir: string | undefined): string {
+  return slot === '' ? configDir || '' : slot
+}
+
+/** The slot a session started on, by its CLAUDE_SECURESTORAGE_CONFIG_DIR: its own CLAUDE_CONFIG_DIR's is the normal login. */
+export function slotFromEnv(secureStorageDir: string | undefined, configDir: string | undefined): string {
+  return !secureStorageDir || secureStorageDir === configDir ? '' : secureStorageDir
+}
+
+/**
+ * The folder added accounts get a slot each in: `accounts` in the session's
+ * CLAUDE_CONFIG_DIR, else in ~/.claude, so two config directories never share
+ * a slot. Undefined with neither.
+ */
+export function accountsDir(configDir: string | undefined, home: string | undefined): string | undefined {
+  const root = configDir || (home && `${home}/.claude`)
+  return root ? `${root}/accounts` : undefined
 }
 
 /** The environment that points a `claude` child at a slot's login. */

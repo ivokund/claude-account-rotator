@@ -18,6 +18,7 @@ import {
   EMPTY_VIEW,
   LEAVE_FIVE_HOUR,
   LEAVE_SEVEN_DAY,
+  accountsDir,
   blockedText,
   browsersFrom,
   canConnectChrome,
@@ -49,7 +50,9 @@ import {
   sameUsage,
   shouldLeave,
   slotEnv,
+  slotFromEnv,
   startOnFrom,
+  storageDir,
   spentReading,
   startWhy,
   stuckText,
@@ -336,14 +339,30 @@ type Stored = { state: 'present'; credential: Credential | undefined } | { state
  */
 type SwitchOptions = { isQuiet?: boolean; isOpening?: boolean; isPicked?: boolean }
 
-/** A slot's stored login, from the keychain on macOS or its file elsewhere (Linux); the secret stays in this module. */
-async function readStored($: Host, slot: string): Promise<Stored> {
-  return (await $.fs.exists(MACOS_MARKER)) ? readKeychain($, slot) : readCredentialsFile($, slot)
+/** The session's CLAUDE_CONFIG_DIR, where Claude Code keeps its normal login and its settings; undefined for ~/.claude. */
+async function configDir($: Host): Promise<string | undefined> {
+  return (await $.env.get('CLAUDE_CONFIG_DIR')) || undefined
 }
 
-async function readKeychain($: Host, slot: string): Promise<Stored> {
+/** The home folder, as Claude Code's own `homedir()` finds it: HOME, else USERPROFILE on Windows. */
+async function homeDir($: Host): Promise<string | undefined> {
+  return (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || undefined
+}
+
+/** The environment that points a `claude` child at a slot's login, the normal one in this session's config directory. */
+async function childEnv($: Host, slot: string): Promise<Record<string, string>> {
+  return slotEnv(storageDir(slot, await configDir($)))
+}
+
+/** A slot's stored login, from the keychain on macOS or its file elsewhere (Linux, Windows); the secret stays in this module. */
+async function readStored($: Host, slot: string): Promise<Stored> {
+  const dir = storageDir(slot, await configDir($))
+  return (await $.fs.exists(MACOS_MARKER)) ? readKeychain($, dir) : readCredentialsFile($, dir)
+}
+
+async function readKeychain($: Host, dir: string): Promise<Stored> {
   const user = keychainUser(await $.env.get('USER'))
-  const argv = ['security', 'find-generic-password', '-a', user, '-w', '-s', await keychainItem(slot)]
+  const argv = ['security', 'find-generic-password', '-a', user, '-w', '-s', await keychainItem(dir)]
   const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 10_000 })
   if (exitCode === 44) return { state: 'absent' }
   if (exitCode !== 0) return { state: 'unreadable', code: exitCode }
@@ -355,8 +374,8 @@ async function readKeychain($: Host, slot: string): Promise<Stored> {
  * missing or locked file, and one caught mid-write (Claude Code renames a new
  * one into place, rewriting it in place only where that fails).
  */
-async function readCredentialsFile($: Host, slot: string): Promise<Stored> {
-  const path = credentialsFile(slot, await $.env.get('HOME'))
+async function readCredentialsFile($: Host, dir: string): Promise<Stored> {
+  const path = credentialsFile(dir, await homeDir($))
   const text = path === undefined ? undefined : await $.fs.read(path).catch(() => undefined)
   return text === undefined ? { state: 'absent' } : { state: 'present', credential: credentialFrom(text) }
 }
@@ -402,7 +421,7 @@ async function fetchIdentity($: Host, by: { token: string } | { auth: string }):
 /** Who a slot is signed in as: email, organization and plan. */
 async function signedInAs($: Host, slot: string): Promise<Identity | undefined> {
   const { exitCode, stdout } = await $.process.run(['claude', 'auth', 'status', '--json'], {
-    env: slotEnv(slot),
+    env: await childEnv($, slot),
     timeoutMs: 20_000,
   })
   return exitCode === 0 ? identityFromStatus(stdout) : undefined
@@ -1247,7 +1266,7 @@ async function signIn($: Host, account: Account): Promise<void> {
   const argv = ['claude', 'auth', 'login', '--claudeai', ...(account.email ? ['--email', account.email] : [])]
   // The child opens the browser itself. The link it prints is the paste-a-code
   // flow, which a background child cannot finish, so stdout goes unread.
-  const child = $.process.spawn({ argv, env: slotEnv(account.slot) })
+  const child = $.process.spawn({ argv, env: await childEnv($, account.slot) })
   running = child
   signingIn = account.id
   let errors = ''
@@ -1272,11 +1291,28 @@ async function signIn($: Host, account: Account): Promise<void> {
   await adoptSignIn($, account)
 }
 
+/**
+ * Another login on the list that `who` signed in as, asked of that login's own
+ * slot: a stored name can be stale, as one an older version of the mod gave
+ * the normal login of a CLAUDE_CONFIG_DIR home. A login whose slot answers as
+ * someone else takes that name, and the list is searched again.
+ */
+async function listedTwin($: Host, account: Account, who: Identity): Promise<Account | undefined> {
+  for (;;) {
+    const accounts = await loadAccounts($)
+    const listed = accounts.find(a => a.id !== account.id && sameLogin(a, who))
+    if (listed === undefined) return undefined
+    const actual = await signedInAs($, listed.slot)
+    if (actual === undefined || sameLogin(actual, who)) return listed
+    await saveAccounts($, accounts.map(a => (a.id === listed.id ? { ...a, ...actual } : a)))
+  }
+}
+
 /** After a browser sign-in: who signed in, and is it a login already on the list? */
 async function adoptSignIn($: Host, account: Account): Promise<void> {
   const who = await signedInAs($, account.slot)
+  const twin = who === undefined ? undefined : await listedTwin($, account, who)
   const accounts = await loadAccounts($)
-  const twin = who === undefined ? undefined : accounts.find(a => a.id !== account.id && sameLogin(a, who))
   if (twin !== undefined) {
     await saveHealth($, account.id, { kind: 'login-needed', why: `that was account ${label(twin)} again` })
     tell(
@@ -1313,11 +1349,16 @@ const signInOne = ($: Host, id: string) =>
     if (account !== undefined) await signIn($, account)
   })
 
-/** Adds a login in a new slot under ~/.claude/accounts and signs it in. */
+/** Adds a login in a new slot under this config directory's `accounts` folder and signs it in. */
 async function addAccount($: Host): Promise<void> {
+  const root = accountsDir(await configDir($), await homeDir($))
+  if (root === undefined) {
+    tell($, 'Cannot add a Claude account: neither CLAUDE_CONFIG_DIR nor a home folder (HOME, USERPROFILE) is set.')
+    return
+  }
   const accounts = await loadAccounts($)
   const id = freeId(accounts)
-  const slot = `${(await $.env.get('HOME')) ?? ''}/.claude/accounts/${id}`
+  const slot = `${root}/${id}`
   await $.fs.write(`${slot}/README`, `Claude account ${id}, kept by the account-rotator mod.\n`)
   await saveAccounts($, [...accounts, { id, slot }])
   await saveHealth($, id, { kind: 'login-needed', why: 'not signed in yet' })
@@ -1336,7 +1377,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
       return
     }
   }
-  await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
+  await $.process.run(['claude', 'auth', 'logout'], { env: await childEnv($, account.slot), timeoutMs: 20_000 })
   await saveAccounts($, view.accounts.filter(a => a.id !== id))
   if (view.chromeAccountId === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
@@ -1438,7 +1479,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
     accounts = [{ id: '1', slot: '' }]
     await saveAccounts($, accounts)
   }
-  const slot = (await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR')) ?? ''
+  const slot = slotFromEnv(await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR'), await configDir($))
   let active = accounts.find(a => a.slot === slot)
   if (active === undefined) {
     // Started on a slot nobody registered (set by hand, or by another tool): adopt it.

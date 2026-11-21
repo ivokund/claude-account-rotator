@@ -1291,11 +1291,28 @@ async function signIn($: Host, account: Account): Promise<void> {
   await adoptSignIn($, account)
 }
 
+/**
+ * Another login on the list that `who` signed in as, asked of that login's own
+ * slot: a stored name can be stale, as one an older version of the mod gave
+ * the normal login of a CLAUDE_CONFIG_DIR home. A login whose slot answers as
+ * someone else takes that name, and the list is searched again.
+ */
+async function listedTwin($: Host, account: Account, who: Identity): Promise<Account | undefined> {
+  for (;;) {
+    const accounts = await loadAccounts($)
+    const listed = accounts.find(a => a.id !== account.id && sameLogin(a, who))
+    if (listed === undefined) return undefined
+    const actual = await signedInAs($, listed.slot)
+    if (actual === undefined || sameLogin(actual, who)) return listed
+    await saveAccounts($, accounts.map(a => (a.id === listed.id ? { ...a, ...actual } : a)))
+  }
+}
+
 /** After a browser sign-in: who signed in, and is it a login already on the list? */
 async function adoptSignIn($: Host, account: Account): Promise<void> {
   const who = await signedInAs($, account.slot)
+  const twin = who === undefined ? undefined : await listedTwin($, account, who)
   const accounts = await loadAccounts($)
-  const twin = who === undefined ? undefined : accounts.find(a => a.id !== account.id && sameLogin(a, who))
   if (twin !== undefined) {
     await saveHealth($, account.id, { kind: 'login-needed', why: `that was account ${label(twin)} again` })
     tell(

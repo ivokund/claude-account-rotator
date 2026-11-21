@@ -450,6 +450,35 @@ test('with CLAUDE_CONFIG_DIR set, an added account gets its slot in that directo
   ])
 })
 
+test('a sign-in that matches another login only by that login\'s stale name is adopted, and the other login takes the name of who it is signed in as', async ($, on) => {
+  const w = fresh('Linux')
+  const slot2 = `${WORK}/accounts/2`
+  w.env = { CLAUDE_CONFIG_DIR: WORK }
+  w.files[`${WORK}/.credentials.json`] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  w.emails[WORK] = 'work@example.com'
+  const shared: Record<string, unknown> = {}
+  w.shared = shared
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'home@example.com', orgId: 'org-home@example.com', orgName: 'Org' }] })
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    w.files[`${slot2}/.credentials.json`] = blob('tok-2')
+    w.emails[slot2] = 'home@example.com'
+    w.usage['tok-2'] = [5, 12]
+    return { value: { code: 0, signal: null } }
+  })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'add' })
+  await clock.settle()
+  await pane.unmount()
+  expect(w.toasts.filter(t => /again/.test(t))).toEqual([])
+  expect(shared.accounts).toEqual([
+    expect.objectContaining({ id: '1', slot: '', email: 'work@example.com' }),
+    expect.objectContaining({ id: '2', slot: slot2, email: 'home@example.com' }),
+  ])
+})
+
 test('a session whose secure storage is its own CLAUDE_CONFIG_DIR, as Claude Code starts a child session, is on the normal login, not a new account', async ($, on) => {
   const w = fresh()
   w.env = { CLAUDE_CONFIG_DIR: WORK, CLAUDE_SECURESTORAGE_CONFIG_DIR: WORK }

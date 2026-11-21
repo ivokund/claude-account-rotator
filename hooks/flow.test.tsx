@@ -111,6 +111,9 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
   isStderrTruncated: false,
 })
 
+/** A path as the tests spell it: Claude Code on Windows hands the fs hooks `/Users/tester/x` resolved to `C:\Users\tester\x`. */
+const posix = (path: string) => path.replace(/^[A-Za-z]:(?=[\\/])/, '').replaceAll('\\', '/')
+
 /** Everything beneath the plugin: keychain or credentials files, `claude auth`, the usage API, the UI sinks. */
 function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   const clock = mock.clock(on, { now: NOW })
@@ -149,7 +152,8 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     if (clock.now() >= held.until && !w.isCacheStuck) held = { slot, until: clock.now() + 30_000 }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
-  const heldSlot = () => held.slot
+  // Claude Code keeps the normal login in the session's CLAUDE_CONFIG_DIR when one is set.
+  const heldSlot = () => held.slot || w.env.CLAUDE_CONFIG_DIR || ''
   on('session.authorize', () => ({ value: w.lendsSignIn === false ? null : { handle: 'session-sign-in', kind: 'bearer' as const } }))
   on('process.run', (_$, e) => {
     const [cmd, sub, verb] = e.argv
@@ -207,7 +211,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   })
   // Claude Code keeps a /login's sign-in where the session reads its own: the slot it is on.
   on('command.run', { command: 'login' }, async () => {
-    if (w.loginToken !== undefined) w.keychain[await keychainItem(slot)] = blob(w.loginToken, NOW + 6 * HOUR, w.loginPlan)
+    if (w.loginToken !== undefined) w.keychain[await keychainItem(slot || w.env.CLAUDE_CONFIG_DIR || '')] = blob(w.loginToken, NOW + 6 * HOUR, w.loginPlan)
     return { text: 'Login successful' }
   })
   // Claude in Chrome connects at its first call, as the slot the session is on then, until `/mcp reconnect`;
@@ -265,9 +269,9 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     return { value: undefined }
   })
   on('fs.write', () => ({ value: undefined }))
-  on('fs.exists', (_$, e) => ({ value: e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS' }))
+  on('fs.exists', (_$, e) => ({ value: posix(e.path) === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS' }))
   on('fs.read', (_$, e) => {
-    const text = w.files[e.path]
+    const text = w.files[posix(e.path)]
     if (text === null) return { deny: `EACCES: permission denied, open '${e.path}'` }
     return text === undefined ? { deny: `ENOENT: no such file or directory, open '${e.path}'` } : { value: text }
   })
@@ -389,6 +393,76 @@ test('on Linux each login is read from the credentials file in its folder, the n
   const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
   expect((await footer.find(GLYPHS))?.text).toBe(' ⣀│⣷│  90% \n ▅│▆│  70% ')
   await footer.unmount()
+})
+
+/** A second Claude home, as `CLAUDE_CONFIG_DIR=~/.claude-work claude` starts one. */
+const WORK = `${HOME}/.claude-work`
+
+for (const system of ['macOS', 'Linux'] as const) {
+  test(`on ${system}, with CLAUDE_CONFIG_DIR set, the normal login is read from that directory, not from ~/.claude`, async ($, on) => {
+    const w = fresh(system)
+    w.env = { CLAUDE_CONFIG_DIR: WORK }
+    w.keychain['Claude Code-credentials'] = blob('tok-home')
+    w.keychain[await keychainItem(WORK)] = blob('tok-1')
+    w.files[FILE1] = blob('tok-home')
+    w.files[`${WORK}/.credentials.json`] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.files[FILE2] = blob('tok-2')
+    w.usage['tok-home'] = [92, 40]
+    w.usage['tok-1'] = [20, 30]
+    w.usage['tok-2'] = [10, 30]
+    const clock = world(on, w, TWO_LOGINS)
+    await start($, clock)
+    expect(w.usageAsked).toContain('tok-1')
+    expect(w.usageAsked).not.toContain('tok-home')
+    expect(w.envSets).toEqual([])
+  })
+}
+
+test('with CLAUDE_CONFIG_DIR set, an added account gets its slot in that directory, and `claude auth` children ask that directory\'s normal login', async ($, on) => {
+  const w = fresh('Linux')
+  const slot2 = `${WORK}/accounts/2`
+  w.env = { CLAUDE_CONFIG_DIR: WORK }
+  w.files[`${WORK}/.credentials.json`] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  w.emails[''] = 'home@example.com'
+  w.emails[WORK] = 'work@example.com'
+  const shared: Record<string, unknown> = {}
+  w.shared = shared
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '' }] })
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    w.files[`${slot2}/.credentials.json`] = blob('tok-2')
+    w.emails[slot2] = 'two@example.com'
+    w.usage['tok-2'] = [5, 12]
+    return { value: { code: 0, signal: null } }
+  })
+  await start($, clock)
+  expect((shared.accounts as { email?: string }[])[0]?.email).toBe('work@example.com')
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'add' })
+  await clock.settle()
+  await pane.unmount()
+  expect(w.spawned.map(s => s.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR)).toEqual([slot2])
+  expect(shared.accounts).toEqual([
+    expect.objectContaining({ id: '1', slot: '', email: 'work@example.com' }),
+    expect.objectContaining({ id: '2', slot: slot2, email: 'two@example.com' }),
+  ])
+})
+
+test('a session whose secure storage is its own CLAUDE_CONFIG_DIR, as Claude Code starts a child session, is on the normal login, not a new account', async ($, on) => {
+  const w = fresh()
+  w.env = { CLAUDE_CONFIG_DIR: WORK, CLAUDE_SECURESTORAGE_CONFIG_DIR: WORK }
+  w.keychain[await keychainItem(WORK)] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const shared: Record<string, unknown> = {}
+  w.shared = shared
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect((shared.accounts as unknown[]).length).toBe(2)
+  expect(w.usageAsked).toContain('tok-1')
 })
 
 test('on Linux a login whose file is missing, holds no Claude login, cannot be read or is not JSON needs a sign-in, as Claude Code counts it', async ($, on) => {

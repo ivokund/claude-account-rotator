@@ -2,12 +2,14 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
-## Unreleased
+## 0.5.2 - 2026-11-23
 
-- **Each `CLAUDE_CONFIG_DIR` keeps its own accounts.** With the mod installed in two Claude homes, say `~/.claude` and one started with `CLAUDE_CONFIG_DIR=~/.claude-work`, both put added accounts in `~/.claude/accounts/<n>`. Account 2 of one home was account 2 of the other: signing it in from one home signed in the other's, and **Remove** in one signed the other's out. Added accounts now go in the `accounts` folder of the session's own config directory. Accounts added before keep the folder they have.
+- **Each `CLAUDE_CONFIG_DIR` keeps its own accounts.** With the mod installed in two Claude homes, say `~/.claude` and one started with `CLAUDE_CONFIG_DIR=~/.claude-work`, both put added accounts in `~/.claude/accounts/<n>`. Account 2 of one home was account 2 of the other: signing it in from one home signed in the other's, and **Remove** in one signed the other's out. Added accounts now go in the `accounts` folder of the session's own config directory. Accounts added before keep the folder they have, so one that two homes already share stays shared. To split it, **Remove** it in the second home and add it again there, then **Sign in** to it again in the first, since **Remove** signed it out.
 - **A home started with `CLAUDE_CONFIG_DIR` reads its own login.** The mod read account 1, Claude Code's login, from `~/.claude` whatever the session's config directory, while Claude Code read it from that directory. So the panel named the `~/.claude` login and showed the usage of the login really in use under its name: one account running out showed another as spent too. The mod now reads account 1 where Claude Code does, as do the `claude auth` commands it runs for it. A session Claude Code starts with its secure storage set to its own config directory is on account 1 too, not a new account.
 - **A stale account name no longer blocks a sign-in.** The older version could save the wrong name for account 1 in a `CLAUDE_CONFIG_DIR` home. Signing in another account as that name then failed with "that was account 1 again". Before the mod says so now, it asks the other account's own login who it is. If that login is someone else, the mod renames that account and keeps the new sign-in.
-- **Windows reads the home folder from `USERPROFILE`** where `HOME` isn't set, as Claude Code does.
+- **Works on Windows.** The mod finds the home folder from `USERPROFILE` where `HOME` isn't set, as Claude Code does.
+
+Thanks to @mhamri (#6).
 
 ## 0.5.1 - 2026-11-20
 

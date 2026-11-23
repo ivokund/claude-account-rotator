@@ -48,7 +48,7 @@ Click it for the panel: each account's usage and reset times, **Sign in**, **Use
 
 ## Requirements
 
-- macOS, where Claude Code keeps sign-ins in the keychain, or Linux, where it keeps them in files.
+- macOS, where Claude Code keeps sign-ins in the keychain, or Linux or Windows, where it keeps them in files.
 - Claude Code 2.1.299 or later, in its fullscreen renderer (`/tui fullscreen`), the only one that passes clicks on: the panel opens with a click.
 - Any Mac terminal: Terminal.app, iTerm2, Ghostty, Warp, VS Code; on Linux, one with mouse reporting. In iTerm2 the profile's *Enable mouse reporting* must be on, in tmux `set -g mouse on`, and iTerm2's `tmux -CC` mode can't run fullscreen.
 - Claude subscription accounts (tested with Max and Team seats). For sessions that switch, keep your `/login` a personal account, Pro or Max: see [Team and Enterprise accounts](#team-and-enterprise-accounts).

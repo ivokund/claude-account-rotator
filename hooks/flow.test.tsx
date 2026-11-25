@@ -85,6 +85,7 @@ type World = {
    */
   shared?: Record<string, unknown>
   storeGate?: (key: string) => Promise<void> | undefined
+  envGate?: (value: string) => Promise<void> | undefined
 }
 
 /** Claude Code's words for a browser call that found no browser, as a session moved off its login gets them. */
@@ -142,7 +143,8 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   // Claude Code reads a sign-in again only just before a request, once its 30 s read has run out:
   // until then it holds the slot it read before, whatever slot the session is on.
   let held = { slot, until: 0 }
-  on('env.set', (_$, e) => {
+  on('env.set', async (_$, e) => {
+    await w.envGate?.(e.value ?? '')
     if (w.refuseEnv) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
     if (w.holdsEnv) return { value: { deny: `${e.name} is held by this session's organization settings` } }
     // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
@@ -3107,10 +3109,63 @@ test('each move of the session to another account is kept in the store, with wha
   await pane.press({ key: 'use-2' })
   await clock.settle()
   await pane.unmount()
-  expect(shared.moves).toEqual([
+  expect(shared['moves:session-1']).toEqual([
     expect.objectContaining({ at: NOW, cause: 'start', to: '1', slot: '' }),
     expect.objectContaining({ cause: 'you picked it', from: '1', to: '2', slot: SLOT2 }),
   ])
+})
+
+test('the moves of each session are kept under its own id, and those of a session that last moved over 30 days ago are dropped', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  const DAY = 24 * 60 * 60_000
+  const recent = [{ at: NOW - 29 * DAY, cause: 'start', to: '1', slot: '' }]
+  const shared: Record<string, unknown> = {}
+  w.shared = shared
+  const clock = world(on, w, {
+    'moves:session-old': [{ at: NOW - 31 * DAY, cause: 'start', to: '1', slot: '' }],
+    'moves:session-recent': recent,
+  })
+  await start($, clock)
+  expect(Object.keys(shared).filter(key => key.startsWith('moves:')).sort()).toEqual(['moves:session-1', 'moves:session-recent'])
+  expect(shared['moves:session-recent']).toEqual(recent)
+})
+
+test('the check at a start that a session may switch does not undo a switch asked for meanwhile', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await mountPane($)
+  let isHolding = true
+  let reach = () => {}
+  let release = () => {}
+  const reached = new Promise<void>(resolve => (reach = resolve))
+  const released = new Promise<void>(resolve => (release = resolve))
+  w.envGate = value => {
+    if (!isHolding || value !== '') return undefined
+    isHolding = false
+    reach()
+    return released
+  }
+  const restart = $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await reached
+  const press = pane.press({ key: 'use-2' })
+  for (let turn = 0; turn < 2000; turn++) await Promise.resolve()
+  release()
+  await restart
+  await press
+  await clock.settle()
+  await clock.advance(36_000)
+  await pane.redraw()
+  expect(slots(w)).toEqual([SLOT2])
+  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/● in use/)
+  await pane.unmount()
 })
 
 test('a start that runs while a switch is made, as after /clear, shows the account the session ends on', async ($, on) => {

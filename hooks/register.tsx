@@ -459,11 +459,24 @@ function inStep<T>(step: () => Promise<T>): Promise<T> {
 
 const MOVES_KEPT = 50
 
+const MOVES_KEPT_MS = 30 * 24 * 60 * 60_000
+const MOVES_PREFIX = 'moves:'
+
 async function noteMove($: Host, move: { cause: string; from?: string; to: string; slot: string }): Promise<void> {
-  const kept = await $.store.get('moves')
-  const { sessionId } = await getView($)
-  const entry = { at: await $.clock.now(), ...(sessionId === undefined ? {} : { sessionId }), ...move }
-  await $.store.set('moves', [...(Array.isArray(kept) ? kept : []), entry].slice(-MOVES_KEPT))
+  const key = `${MOVES_PREFIX}${(await getView($)).sessionId ?? 'unnamed'}`
+  const kept = await $.store.get(key)
+  await $.store.set(key, [...(Array.isArray(kept) ? kept : []), { at: await $.clock.now(), ...move }].slice(-MOVES_KEPT))
+}
+
+async function dropOldMoves($: Host): Promise<void> {
+  const now = await $.clock.now()
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(MOVES_PREFIX)) continue
+    const kept = await $.store.get(key)
+    const last: unknown = Array.isArray(kept) ? kept.at(-1) : undefined
+    const at = typeof last === 'object' && last !== null && typeof (last as { at?: unknown }).at === 'number' ? (last as { at: number }).at : 0
+    if (now - at > MOVES_KEPT_MS) await $.store.delete(key)
+  }
 }
 
 async function accountOnSlot($: Host, slot: string): Promise<Account> {
@@ -1546,9 +1559,13 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const isOpening = (await getView($)).hasStarted !== true
   await mergeStore($)
   await setView($, v => ({ ...v, hasStarted: true, ...(sessionId === undefined ? {} : { sessionId }), ...(model === undefined ? {} : { model }) }))
-  const { account, slot } = await inStep(() => showSlotInUse($, 'start'))
+  await dropOldMoves($)
+  const { account, slot } = await inStep(async () => {
+    const shown = await showSlotInUse($, 'start')
+    await checkSwitching($, shown.slot)
+    return shown
+  })
   const activeId = account.id
-  await checkSwitching($, slot)
   // A window opening on Claude Code's login, with "a fresh 5-hour window" picked, may start elsewhere.
   const opened = await getView($)
   const isStarting = isInteractive && isOpening && slot === '' && opened.startOn === 'fresh' && opened.isSwitchBlocked !== true

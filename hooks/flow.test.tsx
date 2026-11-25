@@ -84,6 +84,7 @@ type World = {
    * session would meanwhile.
    */
   shared?: Record<string, unknown>
+  storeGate?: (key: string) => Promise<void> | undefined
 }
 
 /** Claude Code's words for a browser call that found no browser, as a session moved off its login gets them. */
@@ -121,7 +122,10 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   if (shared === undefined) mock.store(on, store)
   else {
     Object.assign(shared, structuredClone(store))
-    on('store.get', (_$, e) => ({ value: structuredClone(shared[e.key]) }))
+    on('store.get', async (_$, e) => {
+      await w.storeGate?.(e.key)
+      return { value: structuredClone(shared[e.key]) }
+    })
     on('store.set', (_$, e) => {
       shared[e.key] = structuredClone(e.value)
       return { value: undefined }
@@ -3056,5 +3060,91 @@ test('a reading Anthropic\'s rate limit keeps old says its age, with no word of 
   const pane = await mountPane($)
   expect(await pane.find({ text: /^Anthropic is rate limiting usage checks/ })).toBeDefined()
   expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/read 25m ago$/)
+  await pane.unmount()
+})
+
+test('a switch that does not take, where pointing the session back fails too, keeps showing the account the session points at', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  w.isCacheStuck = true
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  w.envFails = true
+  await clock.advance(5 * 60_000)
+  await request($, clock)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.toasts.filter(t => /shows in use again/.test(t))).toEqual([])
+  expect(w.toasts.filter(t => /^The switch to Claude account 2 has not shown in responses\.$/.test(t))).toHaveLength(1)
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/● in use/)
+  expect((await pane.find({ key: 'account-1' }))?.text).not.toMatch(/● in use/)
+  await pane.unmount()
+})
+
+test('each move of the session to another account is kept in the store, with what caused it and the slot the session then points at', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const shared: Record<string, unknown> = {}
+  w.shared = shared
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(shared.moves).toEqual([
+    expect.objectContaining({ at: NOW, cause: 'start', to: '1', slot: '' }),
+    expect.objectContaining({ cause: 'you picked it', from: '1', to: '2', slot: SLOT2 }),
+  ])
+})
+
+test('a start that runs while a switch is made, as after /clear, shows the account the session ends on', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  w.shared = {}
+  const clock = world(on, w, TWO_LOGINS)
+  let isHolding = false
+  let reach = () => {}
+  let release = () => {}
+  const reached = new Promise<void>(resolve => (reach = resolve))
+  const released = new Promise<void>(resolve => (release = resolve))
+  w.storeGate = key => {
+    if (!isHolding || key !== 'footer') return undefined
+    isHolding = false
+    reach()
+    return released
+  }
+  await start($, clock)
+  const pane = await mountPane($)
+  isHolding = true
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await reached
+  await pane.press({ key: 'use-2' })
+  expect(slots(w)).toEqual([SLOT2])
+  release()
+  await clock.settle()
+  await clock.advance(36_000)
+  await pane.redraw()
+  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/● in use/)
+  expect((await pane.find({ key: 'account-1' }))?.text).not.toMatch(/● in use/)
   await pane.unmount()
 })

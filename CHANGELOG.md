@@ -5,6 +5,9 @@ What each version of the account rotator changed. To get each one as Claude Code
 ## Unreleased
 
 - **`/clear` keeps the footer, the band and your accounts.** After a `/clear` the footer under the prompt and the band above it went blank, and the panel listed no accounts, until Claude Code restarted. A `/clear` starts a new session in the same window, and the mod lost what it knew about the old one. It now carries that over: the accounts, their usage, the account in use and a switch still on its way. The window stays on the account it was on.
+- **The account shown in use is the one the session is on.** The mod reads which account a session is on when it starts, which it also does after `/clear`. A switch made while that read was under way could be overwritten by its older answer: the session then sent as one account while the footer marked another, and each response's usage was saved under the marked account, so two accounts showed the same numbers. A start and a switch now take turns, and a start shows what the session points at once it is done.
+- **A switch back that fails no longer shows as made.** When a switch did not take and the session could not be pointed back either, the mod still marked the old account in use. It now keeps the account the session points at, and says the switch has not shown in responses.
+- **The store keeps the last 50 moves.** Each start and each move of a session is kept under `moves` in the mod's store file, with what caused it, so a wrong account in the footer can be traced to the step that put it there.
 
 ## 0.5.2 - 2026-11-23
 

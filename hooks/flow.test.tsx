@@ -386,7 +386,7 @@ test('moves to the login with room once the active one passes 90% of its 5-hour 
   await footer.unmount()
 })
 
-for (const resumedBy of ['SessionStart', 'the next request'] as const) test(`after a /clear, whose new session starts with no state and no session.start, the footer draws again by ${resumedBy} and the session stays where it was`, async ($, on) => {
+for (const resumedBy of ['SessionStart', 'the next request'] as const) test(`after a /clear, whose new session starts with no state and no session.start, the footer draws again by ${resumedBy} and the session stays where it was, at a second /clear too`, async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -406,19 +406,24 @@ for (const resumedBy of ['SessionStart', 'the next request'] as const) test(`aft
   })
   await start($, clock)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
-  isCleared = true
-  await clock.advance(60_000)
-  const cleared = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
-  expect(await cleared.find(GLYPHS)).toBeUndefined()
-  await cleared.unmount()
-  if (resumedBy === 'SessionStart') await $.classic.SessionStart({ source: 'clear' })
-  else await request($, clock)
-  await clock.settle()
-  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
-  expect((await footer.find(GLYPHS))?.text).toBe(' ⣀│⣷│  90% \n ▅│▆│  70% ')
-  await footer.unmount()
-  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  for (const by of [resumedBy, 'SessionStart'] as const) {
+    await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
+    isCleared = true
+    await clock.advance(60_000)
+    const cleared = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+    expect(await cleared.find(GLYPHS)).toBeUndefined()
+    await cleared.unmount()
+    if (by === 'SessionStart') await $.classic.SessionStart({ source: 'clear' })
+    else {
+      await request($, clock)
+      await $.classic.SessionStart({ source: 'clear' })
+    }
+    await clock.settle()
+    const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+    expect((await footer.find(GLYPHS))?.text).toBe(' ⣀│⣷│  90% \n ▅│▆│  70% ')
+    await footer.unmount()
+    expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  }
 })
 
 test('on Linux each login is read from the credentials file in its folder, the normal one\'s in ~/.claude, even with a `security` there', async ($, on) => {

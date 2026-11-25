@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **`/clear` keeps the footer, the band and your accounts.** After a `/clear` the footer under the prompt and the band above it went blank, and the panel listed no accounts, until Claude Code restarted. A `/clear` starts a new session in the same window, and the mod lost what it knew about the old one. It now carries that over: the accounts, their usage, the account in use and a switch still on its way. The window stays on the account it was on.
+
 ## 0.5.2 - 2026-11-23
 
 - **Each `CLAUDE_CONFIG_DIR` keeps its own accounts.** With the mod installed in two Claude homes, say `~/.claude` and one started with `CLAUDE_CONFIG_DIR=~/.claude-work`, both put added accounts in `~/.claude/accounts/<n>`. Account 2 of one home was account 2 of the other: signing it in from one home signed in the other's, and **Remove** in one signed the other's out. Added accounts now go in the `accounts` folder of the session's own config directory. Accounts added before keep the folder they have, so one that two homes already share stays shared. To split it, **Remove** it in the second home and add it again there, then **Sign in** to it again in the first, since **Remove** signed it out.

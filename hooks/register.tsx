@@ -116,6 +116,9 @@ const blinkAtom = atom({ plugin: 'account-rotator', key: 'blink' } as const, tru
  * below 144 columns. Kept in step with closes by the person and with reloads.
  */
 let isPaneShown = false
+/** The view as a /clear found it, put back in the session that follows: the process, its timers and its sign-in go on. */
+let cleared: View | undefined
+let resuming: Promise<void> | undefined
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -689,6 +692,8 @@ async function refreshingSoon(
  */
 async function switchTo($: Host, target: Account, why: string, options: SwitchOptions = {}): Promise<boolean> {
   const { isQuiet = false, isOpening = false, isPicked = false } = options
+  // Between a /clear's end and its view put back, the view names no account in use: a switch would go by a guess.
+  if (cleared !== undefined) return false
   const turning = await refreshingSoon($, await getView($), target, await $.clock.now(), isOpening)
   if (turning !== undefined) {
     if (held === undefined) {
@@ -1525,6 +1530,21 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   }
 }
 
+/** A /clear's new session starts with no state and no session.start: it takes the view on, and starts as a reload does. */
+function resumeAfterClear($: Host): Promise<void> {
+  resuming ??= (async () => {
+    const view = cleared
+    if (view !== undefined) {
+      await setView($, () => ({ ...view, sessionId: undefined }))
+      if (view.pending !== undefined && view.pending.isDue !== true) watchSwitch($, view.pending.since)
+    }
+    cleared = undefined
+    resuming = undefined
+    await boot($, true)
+  })()
+  return resuming
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -1533,19 +1553,34 @@ export const register: Register = on => {
       isPaneShown = panes.some(p => p.id === PANE && p.isShown)
     })
     $.clock.every(60_000, () => {
+      if (cleared !== undefined) return
       void mergeStore($)
         .then(() => settleOnce($, false))
         .then(() => maybeRotate($))
         .catch(error => debug($, `sync failed: ${String(error)}`))
     })
     $.clock.every(10 * 60_000, () => {
+      if (cleared !== undefined) return
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
     })
     return started
   })
 
+  // Between a /clear's end and its new session's start the view is empty: the timers wait, and nothing switches on a guess.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') cleared = await getView($)
+    return next(e)
+  })
+
+  on('classic.SessionStart', async ($, e, next) => {
+    const started = await next(e)
+    if (e.source === 'clear') void resumeAfterClear($).catch(error => debug($, `start after /clear failed: ${String(error)}`))
+    return started
+  }).catch(($, e, next) => next(e))
+
   // Claude Code reads the sign-in again just before a request: the profile check is sure of a switch only after one.
   on('turn.step', async function* ($, e, next) {
+    if (cleared !== undefined) await resumeAfterClear($).catch(error => debug($, `start after /clear failed: ${String(error)}`))
     lastRequestAt = await $.clock.now()
     checks = 0
     // The main loop's model, where no /model told it; a subagent's requests name their own.

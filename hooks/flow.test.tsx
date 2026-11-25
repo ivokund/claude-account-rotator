@@ -132,8 +132,9 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     })
     on('store.keys', () => ({ value: Object.keys(shared) }))
   }
-  mock.env(on, { USER: 'tester', HOME, ...w.env })
+  const env: Record<string, string> = { USER: 'tester', HOME, ...w.env }
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
+  on('env.get', (_$, e) => ({ value: e.name === 'CLAUDE_SECURESTORAGE_CONFIG_DIR' ? slot || undefined : env[e.name] }))
   // Claude Code reads a sign-in again only just before a request, once its 30 s read has run out:
   // until then it holds the slot it read before, whatever slot the session is on.
   let held = { slot, until: 0 }
@@ -377,6 +378,41 @@ test('moves to the login with room once the active one passes 90% of its 5-hour 
   expect(lineAfter).toMatchObject({ color: 'subtle' })
   expect(percent).toMatchObject({ color: roomColor(90) })
   await footer.unmount()
+})
+
+for (const resumedBy of ['SessionStart', 'the next request'] as const) test(`after a /clear, whose new session starts with no state and no session.start, the footer draws again by ${resumedBy} and the session stays where it was`, async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [92, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  let isCleared = false
+  on('state.get', { plugin: 'account-rotator' }, (_$, e, next) => {
+    if (!isCleared || e.key !== 'view') return next(e)
+    return Promise.resolve(next(e)).then(stored => (stored.value === undefined ? stored : { value: { ...stored.value, value: undefined } }))
+  })
+  on('state.set', { plugin: 'account-rotator' }, (_$, e, next) => {
+    if (e.key === 'view') isCleared = false
+    return next(e)
+  })
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
+  isCleared = true
+  await clock.advance(60_000)
+  const cleared = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect(await cleared.find(GLYPHS)).toBeUndefined()
+  await cleared.unmount()
+  if (resumedBy === 'SessionStart') await $.classic.SessionStart({ source: 'clear' })
+  else await request($, clock)
+  await clock.settle()
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.find(GLYPHS))?.text).toBe(' ⣀│⣷│  90% \n ▅│▆│  70% ')
+  await footer.unmount()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
 })
 
 test('on Linux each login is read from the credentials file in its folder, the normal one\'s in ~/.claude, even with a `security` there', async ($, on) => {

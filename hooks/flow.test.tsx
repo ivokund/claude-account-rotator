@@ -3070,7 +3070,7 @@ test('a reading Anthropic\'s rate limit keeps old says its age, with no word of 
   await pane.unmount()
 })
 
-test('a switch that does not take, where pointing the session back fails too, keeps showing the account the session points at', async ($, on) => {
+test('a switch that does not take, where pointing the session back fails too, shows in use the account responses still come from', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -3092,10 +3092,10 @@ test('a switch that does not take, where pointing the session back fails too, ke
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2])
   expect(w.toasts.filter(t => /shows in use again/.test(t))).toEqual([])
-  expect(w.toasts.filter(t => /^The switch to Claude account 2 has not shown in responses\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^The switch to Claude account 2 has not shown in responses, and the session could not be pointed back: responses still use account 1 .*, so it shows in use\.$/.test(t))).toHaveLength(1)
   const pane = await mountPane($)
-  expect((await pane.find({ key: 'account-2' }))?.text).toMatch(/● in use/)
-  expect((await pane.find({ key: 'account-1' }))?.text).not.toMatch(/● in use/)
+  expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/● in use/)
+  expect((await pane.find({ key: 'account-2' }))?.text).not.toMatch(/● in use/)
   await pane.unmount()
 })
 

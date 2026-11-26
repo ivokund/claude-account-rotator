@@ -992,6 +992,9 @@ async function giveUpPending($: Host, pending: Pending, from: Account | undefine
       )
       return
     }
+    await setView($, v => (isStill(v, pending) ? { ...v, activeId: from.id, pending: undefined } : v))
+    tell($, `The switch to Claude account ${pending.id} has not shown in responses, and the session could not be pointed back: responses still use account ${label(from)}, so it shows in use.`)
+    return
   }
   await setView($, v => (isStill(v, pending) ? { ...v, pending: undefined } : v))
   tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)

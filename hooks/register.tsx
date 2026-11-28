@@ -981,6 +981,17 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   await maybeRotate($)
 }
 
+/** Claude's prompt to carry on, waiting for a move to land: a /clear, /resume or /branch before then starts a conversation it isn't for. */
+let carryOn: Timer | undefined
+
+function carryOnAfter($: Host, ms: number, text = CONTINUE): void {
+  carryOn?.cancel()
+  carryOn = $.clock.after(ms, () => {
+    carryOn = undefined
+    void $.prompt.submit({ text })
+  })
+}
+
 /** A turn that died on a usage limit or a rejected sign-in: switch, then carry on. */
 async function onStopFailure($: Host, error: string): Promise<void> {
   if (error !== 'rate_limit' && error !== 'authentication_failed') return
@@ -997,7 +1008,7 @@ async function onStopFailure($: Host, error: string): Promise<void> {
     if (!shouldLeave(await getView($), await $.clock.now())) {
       if (isConnectingChrome) isCutByVisit = true
       // Once the switch lands, as a turn the switch itself cut short would.
-      else $.clock.after(Math.max(0, pending.since + SETTLE_MS - (await $.clock.now())), () => void $.prompt.submit({ text: CONTINUE }))
+      else carryOnAfter($, Math.max(0, pending.since + SETTLE_MS - (await $.clock.now())))
       return
     }
   } else if (error === 'authentication_failed') {
@@ -1014,7 +1025,7 @@ async function onStopFailure($: Host, error: string): Promise<void> {
   }
   await setView($, v => ({ ...v, pending: undefined }))
   if (await maybeRotate($)) {
-    $.clock.after(SETTLE_MS, () => void $.prompt.submit({ text: CONTINUE }))
+    carryOnAfter($, SETTLE_MS)
   } else if (isConnectingChrome) isCutByVisit = true
 }
 
@@ -1159,7 +1170,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string, start?: Account
     isCutByVisit = false
     if (text !== undefined) {
       // Once the move back lands: until then the turn's requests may go out as the extension's account.
-      if (isMoved) $.clock.after(SETTLE_MS, () => void $.prompt.submit({ text }))
+      if (isMoved) carryOnAfter($, SETTLE_MS, text)
       else void $.prompt.submit({ text })
     }
     return done?.answer
@@ -1570,8 +1581,16 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
 /** A session ended in this window, as a /clear, /resume or /branch ends one: the next minute's tick or request takes up the new one. */
 let hasSessionEnded = false
 
-/** A /clear, /resume or /branch ends the window's session and starts another on the same account. */
+/**
+ * A /clear, /resume or /branch ends the window's session and starts another
+ * on the same account. What Claude was to carry on with, or be told once
+ * Claude in Chrome connects, was the conversation before's.
+ */
 function endSession(): void {
+  carryOn?.cancel()
+  carryOn = undefined
+  isChromeAwaited = false
+  isCutByVisit = false
   hasSessionEnded = true
 }
 

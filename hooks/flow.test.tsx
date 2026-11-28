@@ -3185,6 +3185,25 @@ test('a reload in the middle of Connect\'s visit, which ends the visit, leaves n
   await band.unmount()
 })
 
+test('a /clear while the switch for a turn cut by the usage limit lands sends no Continue into the fresh conversation', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [60, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  const wipe = wipeable(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(10_000)
+  await restartAs($, 'clear', wipe)
+  await clock.advance(36_000)
+  expect(w.submitted).toEqual([])
+})
+
 /** A switch that doesn't take, Claude Code still sending login 1's sign-in, and pointing back fails. */
 async function stuckOnOne(on: On, $: Engine, w: World): Promise<MockClock> {
   w.keychain['Claude Code-credentials'] = blob('tok-1')

@@ -2,6 +2,16 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.3 - 2026-11-28
+
+- **`/clear`, `/resume` and `/branch` keep the window's account.** Each starts a new session in the same window, and the mod lost track of it: the footer and the band went blank, and when they came back the mod took the window to be on account 1. So the footer marked the wrong account, and the usage of the account really in use was saved as account 1's, for every window to see. The window now keeps its footer, its account and a switch still on its way.
+- **A switch made as the mod starts is kept.** A switch made just as the mod started, at a window's opening or a reload of its code, could be undone: the window went back to the account before, or the footer marked one account while the window sent as another.
+- **A switch back that fails says so.** When a switch didn't take and the mod couldn't point the window back either, it said it had switched back. It now says the window couldn't be pointed back, and where Claude Code refused, that the window can't switch.
+- **A reload of the mod leaves Claude in Chrome connected.** After an update or a settings change, the mod connected Claude in Chrome again as at a window's opening: a ~35 s visit to the extension's account and a reconnect, though the connection was fine. Only a window opening connects now.
+- **No stray "Continue where you left off" after `/clear`.** After a usage limit or **Connect**'s visit, the mod asks Claude to carry on once the switch lands, about 35 s later. A `/clear`, `/resume` or `/branch` in between sent that into the new conversation.
+
+Thanks to @mhamri (#9).
+
 ## 0.5.2 - 2026-11-23
 
 - **Each `CLAUDE_CONFIG_DIR` keeps its own accounts.** With the mod installed in two Claude homes, say `~/.claude` and one started with `CLAUDE_CONFIG_DIR=~/.claude-work`, both put added accounts in `~/.claude/accounts/<n>`. Account 2 of one home was account 2 of the other: signing it in from one home signed in the other's, and **Remove** in one signed the other's out. Added accounts now go in the `accounts` folder of the session's own config directory. Accounts added before keep the folder they have, so one that two homes already share stays shared. To split it, **Remove** it in the second home and add it again there, then **Sign in** to it again in the first, since **Remove** signed it out.

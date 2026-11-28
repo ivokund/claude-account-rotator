@@ -105,7 +105,8 @@ const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 const CONTINUE =
   'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in. Continue where you left off.'
 
-const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY_VIEW)
+/** A plain reference, not an atom: after Claude Code empties the state it reads as never written, and the view before is used (see lastView). */
+const VIEW = { plugin: 'account-rotator', key: 'view' } as const
 /** Whether a pending switch's in-use mark is drawn this beat: only the footer reads it, and only while a switch is pending. */
 const blinkAtom = atom({ plugin: 'account-rotator', key: 'blink' } as const, true)
 
@@ -116,11 +117,6 @@ const blinkAtom = atom({ plugin: 'account-rotator', key: 'blink' } as const, tru
  * below 144 columns. Kept in step with closes by the person and with reloads.
  */
 let isPaneShown = false
-/** The view as a /clear found it, put back in the session that follows: the process, its timers and its sign-in go on. */
-let cleared: View | undefined
-/** From a /clear's end until its view is put back: no switch is made, and the timers wait. */
-let isClearing = false
-let resuming: Promise<void> | undefined
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -149,15 +145,27 @@ let checks = 0
 let isConnectingChrome = false
 
 // ---------------------------------------------------------------- state
-// The view is this session's; the store is one JSON file every session of the
+// The view is this window's; the store is one JSON file every session of the
 // mod shares: the list of logins, each login's last reading and health under a
 // key of its own, so sessions writing different logins never collide, the
 // footer's look, and which login the rotation moves to.
 
+/**
+ * The view as this code last wrote it, or first read it after a hot reload.
+ * Claude Code empties every plugin's state when /clear, /resume or /branch
+ * starts the window's session afresh, and no session.start follows: the
+ * window goes on, on the same account, with the mod's timers, so the view
+ * goes on from here until it is written again.
+ */
+let lastView: View | undefined
 /** The view survives a hot reload as the code before wrote it: what this code added starts as in a new session. */
-const current = (v: View): View => ({ ...EMPTY_VIEW, ...v })
-const getView = async ($: Host): Promise<View> => current(await read($, viewAtom))
-const setView = ($: Host, fn: (v: View) => View): Promise<View> => update($, viewAtom, v => fn(current(v)))
+const current = (v: View | undefined): View => ({ ...EMPTY_VIEW, ...(v ?? lastView) })
+async function getView($: Host): Promise<View> {
+  const v = await read($, VIEW)
+  lastView ??= v
+  return current(v)
+}
+const setView = ($: Host, fn: (v: View) => View): Promise<View> => update($, VIEW, v => (lastView = fn(current(v))))
 /** Something the person should know that nothing on screen says: a toast, on screen for a while. */
 const tell = ($: Host, text: string) => $.ui.toast(text, { timeoutMs: 8000 })
 const debug = ($: Host, text: string) => $.ui.log(`account-rotator: ${text}`, { to: 'debug' })
@@ -442,64 +450,25 @@ class SwitchHeld extends Error {}
 /** Whether a switch failed because Claude Code won't let this session switch, however it said so. */
 const isRefusal = (error: unknown): boolean => error instanceof SwitchHeld || isPolicyRefusal(error)
 
-/** Points this session's requests, and every child it starts after, at a slot's login. */
-async function useSlot($: Host, slot: string): Promise<void> {
-  const set = slot === '' ? await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined) : await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', slot)
-  if (set.deny !== undefined) throw new SwitchHeld(set.deny)
-}
-
+/** The slot this session's requests use now, as its environment says. */
 const slotInUse = async ($: Host): Promise<string> => slotFromEnv(await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR'), await configDir($))
 
-let lastStep: Promise<unknown> = Promise.resolve()
+/** The mod's settings of the slot, one at a time in the order made: none overtakes another on its way. */
+let slotQueue: Promise<unknown> = Promise.resolve()
 
-// See README.md, "How it works": the account in use.
-function inStep<T>(step: () => Promise<T>): Promise<T> {
-  const run = lastStep.then(step, step)
-  lastStep = run.catch(() => undefined)
-  return run
-}
-
-const MOVES_KEPT = 50
-
-const MOVES_KEPT_MS = 30 * 24 * 60 * 60_000
-const MOVES_PREFIX = 'moves:'
-
-async function noteMove($: Host, move: { cause: string; from?: string; to: string; slot: string }): Promise<void> {
-  const key = `${MOVES_PREFIX}${(await getView($)).sessionId ?? 'unnamed'}`
-  const kept = await $.store.get(key)
-  await $.store.set(key, [...(Array.isArray(kept) ? kept : []), { at: await $.clock.now(), ...move }].slice(-MOVES_KEPT))
-}
-
-async function dropOldMoves($: Host): Promise<void> {
-  const now = await $.clock.now()
-  for (const key of await $.store.keys()) {
-    if (!key.startsWith(MOVES_PREFIX)) continue
-    const kept = await $.store.get(key)
-    const last: unknown = Array.isArray(kept) ? kept.at(-1) : undefined
-    const at = typeof last === 'object' && last !== null && typeof (last as { at?: unknown }).at === 'number' ? (last as { at: number }).at : 0
-    if (now - at > MOVES_KEPT_MS) await $.store.delete(key)
-  }
-}
-
-async function accountOnSlot($: Host, slot: string): Promise<Account> {
-  const accounts = await loadAccounts($)
-  const listed = accounts.find(a => a.slot === slot)
-  if (listed !== undefined) return listed
-  const adopted = { id: freeId(accounts), slot }
-  await saveAccounts($, [...accounts, adopted])
-  return adopted
-}
-
-async function showSlotInUse($: Host, cause: string): Promise<{ account: Account; slot: string }> {
-  for (;;) {
-    const slot = await slotInUse($)
-    const account = await accountOnSlot($, slot)
-    const before = await getView($)
-    await setView($, v => ({ ...v, accounts: v.accounts.some(a => a.id === account.id) ? v.accounts : [...v.accounts, account], activeId: account.id }))
-    if ((await slotInUse($)) !== slot) continue
-    await noteMove($, { cause, ...(before.activeId === account.id ? {} : { from: before.activeId }), to: account.id, slot })
-    return { account, slot }
-  }
+/**
+ * Points this session's requests, and every child it starts after, at a
+ * slot's login. With no slot, sets the one in use as its turn comes, which
+ * changes nothing: never one read before a switch made meanwhile.
+ */
+async function useSlot($: Host, slot?: string): Promise<void> {
+  const setting = slotQueue.then(async () => {
+    const to = slot ?? (await slotInUse($))
+    return to === '' ? $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined) : $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', to)
+  })
+  slotQueue = setting.catch(() => undefined)
+  const set = await setting
+  if (set.deny !== undefined) throw new SwitchHeld(set.deny)
 }
 
 /**
@@ -521,9 +490,9 @@ async function blocked($: Host): Promise<boolean> {
  * Sets the slot already in use, which changes nothing: the policy that refuses
  * a switch refuses this too, so a session that cannot switch says so at its start.
  */
-async function checkSwitching($: Host, slot: string): Promise<void> {
+async function checkSwitching($: Host): Promise<void> {
   try {
-    await useSlot($, slot)
+    await useSlot($)
   } catch (error) {
     if (isRefusal(error)) await blocked($)
     else await debug($, `switch check failed: ${String(error)}`)
@@ -748,8 +717,6 @@ async function refreshingSoon(
  */
 async function switchTo($: Host, target: Account, why: string, options: SwitchOptions = {}): Promise<boolean> {
   const { isQuiet = false, isOpening = false, isPicked = false } = options
-  // Between a /clear's end and its view put back, the view names no account in use: a switch would go by a guess.
-  if (isClearing) return false
   const turning = await refreshingSoon($, await getView($), target, await $.clock.now(), isOpening)
   if (turning !== undefined) {
     if (held === undefined) {
@@ -769,26 +736,18 @@ async function switchTo($: Host, target: Account, why: string, options: SwitchOp
   held?.timer.cancel()
   held = undefined
   await keepChrome($)
-  let now: number | undefined
   try {
-    now = await inStep(() => (isClearing ? Promise.resolve(undefined) : moveTo($, target, why, { isQuiet, isPicked })))
+    await useSlot($, target.slot)
   } catch (error) {
     if (!isRefusal(error)) throw error
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
     if (!(await blocked($))) tell($, blockedText(await getView($)))
     return false
   }
-  if (now === undefined) return false
-  watchSwitch($, now)
-  return true
-}
-
-async function moveTo($: Host, target: Account, why: string, { isQuiet, isPicked }: { isQuiet: boolean; isPicked: boolean }): Promise<number> {
-  await useSlot($, target.slot)
   const now = await $.clock.now()
   movedAt = now
+  void debug($, `moved to account ${target.id} (${why}), slot ${target.slot || 'Claude Code\'s login'}`)
   await update($, blinkAtom, () => true)
-  const before = await getView($)
   await setView($, v => ({
     ...v,
     activeId: target.id,
@@ -802,8 +761,8 @@ async function moveTo($: Host, target: Account, why: string, { isQuiet, isPicked
     },
     removing: undefined,
   }))
-  await noteMove($, { cause: why, from: before.activeId, to: target.id, slot: target.slot })
-  return now
+  watchSwitch($, now)
+  return true
 }
 
 /**
@@ -980,40 +939,33 @@ async function dueFor($: Host, pending: Pending): Promise<void> {
  */
 async function giveUpPending($: Host, pending: Pending, from: Account | undefined): Promise<void> {
   if (!isStill(await getView($), pending)) return
-  if (from !== undefined) {
-    untaken.add(pending.id)
-    const back = await inStep(() => moveBack($, pending, from))
-    if (back === 'overtaken') return
-    if (back === 'moved') {
-      tell(
-        $,
-        `The switch to Claude account ${pending.id} did not take: responses still use account ${label(from)}, so it shows in use again. ` +
-          `The rotation leaves account ${pending.id} be in this session; Use now tries it again.`,
-      )
-      return
-    }
-    await setView($, v => (isStill(v, pending) ? { ...v, activeId: from.id, pending: undefined } : v))
-    tell($, `The switch to Claude account ${pending.id} has not shown in responses, and the session could not be pointed back: responses still use account ${label(from)}, so it shows in use.`)
+  if (from === undefined) {
+    await setView($, v => (isStill(v, pending) ? { ...v, pending: undefined } : v))
+    tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
     return
   }
-  await setView($, v => (isStill(v, pending) ? { ...v, pending: undefined } : v))
-  tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
-}
-
-async function moveBack($: Host, pending: Pending, from: Account): Promise<'moved' | 'overtaken' | 'failed'> {
-  // Another switch made meanwhile is the one waited on now: its own check says how it went.
-  if (!isStill(await getView($), pending)) return 'overtaken'
+  untaken.add(pending.id)
+  let isBack = true
   try {
     await useSlot($, from.slot)
+    movedAt = await $.clock.now()
+    void debug($, `moved back to account ${from.id}: the switch to account ${pending.id} did not take`)
   } catch (error) {
+    isBack = false
     if (isRefusal(error)) await blocked($)
     else await debug($, `switch back failed: ${String(error)}`)
-    return 'failed'
   }
-  movedAt = await $.clock.now()
-  await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
-  await noteMove($, { cause: `the switch to account ${pending.id} did not take`, from: pending.id, to: from.id, slot: from.slot })
-  return 'moved'
+  // Another switch made meanwhile is the one waited on now: its own check says how it went.
+  const after = await setView($, v => (isStill(v, pending) ? { ...v, activeId: from.id, pending: undefined } : v))
+  if (after.pending !== undefined || after.activeId !== from.id) return
+  tell(
+    $,
+    isBack
+      ? `The switch to Claude account ${pending.id} did not take: responses still use account ${label(from)}, so it shows in use again. ` +
+          `The rotation leaves account ${pending.id} be in this session; Use now tries it again.`
+      : `The switch to Claude account ${pending.id} has not shown in responses, and the session could not be pointed back: ` +
+          `responses still use account ${label(from)}, so it shows in use.`,
+  )
 }
 
 /** A response's own usage: the active login's, unless a switch is still settling. */
@@ -1558,20 +1510,30 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   await setView($, v => ({ ...v, hasFontBlocks }))
-  if ((await loadAccounts($)).length === 0) await saveAccounts($, [{ id: '1', slot: '' }])
+  let accounts = await loadAccounts($)
+  if (accounts.length === 0) {
+    accounts = [{ id: '1', slot: '' }]
+    await saveAccounts($, accounts)
+  }
+  // A switch made while the mod starts sets the account in use itself, and is not to be overwritten with the one read here.
+  const movedBefore = movedAt
+  const slot = await slotInUse($)
+  let active = accounts.find(a => a.slot === slot)
+  if (active === undefined) {
+    // Started on a slot nobody registered (set by hand, or by another tool): adopt it.
+    active = { id: freeId(accounts), slot }
+    accounts = [...accounts, active]
+    await saveAccounts($, accounts)
+  }
+  const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
   const model = await $.session.model().catch(() => undefined)
   // The mod starts again at every reload of its code, in a session by then at work: only its first start is a window opening.
   const isOpening = (await getView($)).hasStarted !== true
   await mergeStore($)
-  await setView($, v => ({ ...v, hasStarted: true, ...(sessionId === undefined ? {} : { sessionId }), ...(model === undefined ? {} : { model }) }))
-  await dropOldMoves($)
-  const { account, slot } = await inStep(async () => {
-    const shown = await showSlotInUse($, 'start')
-    await checkSwitching($, shown.slot)
-    return shown
-  })
-  const activeId = account.id
+  await setView($, v => ({ ...v, ...(movedAt === movedBefore ? { activeId } : {}), hasStarted: true, ...(sessionId === undefined ? {} : { sessionId }), ...(model === undefined ? {} : { model }) }))
+  await checkSwitching($)
+  await debug($, `started on account ${(await getView($)).activeId}, slot ${(await slotInUse($)) || 'Claude Code\'s login'}`)
   // A window opening on Claude Code's login, with "a fresh 5-hour window" picked, may start elsewhere.
   const opened = await getView($)
   const isStarting = isInteractive && isOpening && slot === '' && opened.startOn === 'fresh' && opened.isSwitchBlocked !== true
@@ -1602,24 +1564,31 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   }
 }
 
-/** A /clear's new session starts with no state and no session.start: it takes the view on, and starts as a reload does. */
-function resumeAfterClear($: Host): Promise<void> {
-  resuming ??= putBackAfterClear($).finally(() => {
-    resuming = undefined
-  })
-  return resuming
+/** A session ended in this window, as a /clear, /resume or /branch ends one: the next minute's tick or request takes up the new one. */
+let hasSessionEnded = false
+
+/** A /clear, /resume or /branch ends the window's session and starts another on the same account. */
+function endSession(): void {
+  hasSessionEnded = true
 }
 
-async function putBackAfterClear($: Host): Promise<void> {
-  const view = cleared
-  if (view !== undefined) {
-    const sessionId = await $.session.id().catch(() => undefined)
-    await setView($, () => ({ ...view, sessionId }))
-    if (view.pending !== undefined && view.pending.isDue !== true) watchSwitch($, view.pending.since)
+/**
+ * Takes up the window's new session: its id, which `claude --resume` takes,
+ * and whether it may switch. Claude Code's security default holds until a
+ * session ends: a window it stopped from switching is checked again.
+ */
+async function takeUpSession($: Host): Promise<void> {
+  if (!hasSessionEnded) return
+  hasSessionEnded = false
+  const sessionId = await $.session.id().catch(() => undefined)
+  const view = await setView($, v => ({ ...v, ...(sessionId === undefined ? {} : { sessionId }) }))
+  if (!view.isSwitchBlocked) return
+  try {
+    await useSlot($)
+    await setView($, v => ({ ...v, isSwitchBlocked: false, isStuckTold: false }))
+  } catch (error) {
+    if (!isRefusal(error)) await debug($, `switch check failed: ${String(error)}`)
   }
-  cleared = undefined
-  isClearing = false
-  await boot($, true)
 }
 
 export const register: Register = on => {
@@ -1630,39 +1599,30 @@ export const register: Register = on => {
       isPaneShown = panes.some(p => p.id === PANE && p.isShown)
     })
     $.clock.every(60_000, () => {
-      if (isClearing) return
-      void mergeStore($)
+      void takeUpSession($)
+        .then(() => mergeStore($))
         .then(() => settleOnce($, false))
         .then(() => maybeRotate($))
         .catch(error => debug($, `sync failed: ${String(error)}`))
     })
     $.clock.every(10 * 60_000, () => {
-      if (isClearing) return
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
     })
     return started
   })
 
-  // Between a /clear's end and its new session's start the view is empty: the timers wait, and nothing switches on a guess.
+  // At a /clear, /resume or /branch Claude Code then empties the mod's state, and no session.start comes: the window goes on as it was.
+  // Not classic.SessionStart: in a window on a Team seat Claude Code's security default sends classic events past the mod.
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') {
-      isClearing = true
-      cleared = await inStep(() => getView($))
-    }
+    endSession()
     return next(e)
   })
 
-  on('classic.SessionStart', async ($, e, next) => {
-    const started = await next(e)
-    if (e.source === 'clear') void resumeAfterClear($).catch(error => debug($, `start after /clear failed: ${String(error)}`))
-    return started
-  }).catch(($, e, next) => next(e))
-
   // Claude Code reads the sign-in again just before a request: the profile check is sure of a switch only after one.
   on('turn.step', async function* ($, e, next) {
-    if (isClearing) await resumeAfterClear($).catch(error => debug($, `start after /clear failed: ${String(error)}`))
     lastRequestAt = await $.clock.now()
     checks = 0
+    if (e.agentId === undefined) void takeUpSession($).catch(error => debug($, `new session failed: ${String(error)}`))
     // The main loop's model, where no /model told it; a subagent's requests name their own.
     if (e.agentId === undefined && (await noteModel($, e.model))) {
       void maybeRotate($).catch(error => debug($, `rotate failed: ${String(error)}`))

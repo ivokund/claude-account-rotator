@@ -25,6 +25,8 @@ type World = {
   fable?: Record<string, number>
   /** The session's model, as `$.session.model()` answers it. */
   model?: string
+  /** The session's id, as `$.session.id()` answers it: session-1 unless a /clear or a resume started another. */
+  sessionId?: string
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -84,6 +86,10 @@ type World = {
    * session would meanwhile.
    */
   shared?: Record<string, unknown>
+  /** Holds a read of a store key, as another process's slow disk would: the session goes on meanwhile. */
+  storeGate?: (key: string) => Promise<void> | undefined
+  /** Holds a setting of the slot, as Claude Code would while busy: the session goes on meanwhile. */
+  envGate?: (value: string) => Promise<void> | undefined
 }
 
 /** Claude Code's words for a browser call that found no browser, as a session moved off its login gets them. */
@@ -121,7 +127,10 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   if (shared === undefined) mock.store(on, store)
   else {
     Object.assign(shared, structuredClone(store))
-    on('store.get', (_$, e) => ({ value: structuredClone(shared[e.key]) }))
+    on('store.get', async (_$, e) => {
+      await w.storeGate?.(e.key)
+      return { value: structuredClone(shared[e.key]) }
+    })
     on('store.set', (_$, e) => {
       shared[e.key] = structuredClone(e.value)
       return { value: undefined }
@@ -132,12 +141,15 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     })
     on('store.keys', () => ({ value: Object.keys(shared) }))
   }
-  mock.env(on, { USER: 'tester', HOME, ...w.env })
+  const env: Record<string, string> = { USER: 'tester', HOME, ...w.env }
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
+  // The slot read back is the one last set: a switch shows in the session's environment at once.
+  on('env.get', (_$, e) => ({ value: e.name === 'CLAUDE_SECURESTORAGE_CONFIG_DIR' ? slot || undefined : env[e.name] }))
   // Claude Code reads a sign-in again only just before a request, once its 30 s read has run out:
   // until then it holds the slot it read before, whatever slot the session is on.
   let held = { slot, until: 0 }
-  on('env.set', (_$, e) => {
+  on('env.set', async (_$, e) => {
+    await w.envGate?.(e.value ?? '')
     if (w.refuseEnv) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
     if (w.holdsEnv) return { value: { deny: `${e.name} is held by this session's organization settings` } }
     // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
@@ -246,7 +258,9 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     return { text: e.text }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'session-1' }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}))
+  on('session.id', () => ({ value: w.sessionId ?? 'session-1' }))
   on('session.model', () => ({ value: w.model ?? 'claude-opus-5-5' }))
   on('tool.check', () => ({ decision: 'allow' as const }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: w.limits } }))
@@ -3021,4 +3035,224 @@ test('a reading Anthropic\'s rate limit keeps old says its age, with no word of 
   expect(await pane.find({ text: /^Anthropic is rate limiting usage checks/ })).toBeDefined()
   expect((await pane.find({ key: 'account-1' }))?.text).toMatch(/read 25m ago$/)
   await pane.unmount()
+})
+
+// ---------------------------------------------------------------- a fresh session in the window; reloads; races
+
+/**
+ * Claude Code empties every plugin's state when a /clear, /resume or /branch
+ * ends the window's session, and goes on under the new one with no
+ * session.start: the view reads as never written until the mod writes it.
+ */
+function wipeable(on: On): () => void {
+  let isWiped = false
+  on('state.get', { plugin: 'account-rotator' }, (_$, e, next) => {
+    if (!isWiped || e.key !== 'view') return next(e)
+    return Promise.resolve(next(e)).then(stored => (stored.value === undefined ? stored : { value: { ...stored.value, value: undefined } }))
+  })
+  on('state.set', { plugin: 'account-rotator' }, (_$, e, next) => {
+    if (e.key === 'view') isWiped = false
+    return next(e)
+  })
+  return () => {
+    isWiped = true
+  }
+}
+
+const mountFooter = ($: Engine) => $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+
+/** A session end for each way a window starts a fresh session, and the SessionStart that follows. */
+async function restartAs($: Engine, source: 'clear' | 'resume' | 'fork', wipe: () => void): Promise<void> {
+  await $.session.end({ reason: source === 'clear' ? 'clear' : 'resume', sessionId: 'session-1', resume: { id: 'session-1' } })
+  wipe()
+  await $.classic.SessionStart({ source, session_id: 'session-2' })
+}
+
+for (const source of ['clear', 'resume', 'fork'] as const) {
+  test(`a /${source === 'fork' ? 'branch' : source}, which empties the mod's state and starts no session, leaves the window's footer drawn and its account in use: a response's usage lands under it, and the window stays put`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [92, 40]
+    w.usage['tok-2'] = [10, 30]
+    w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+    const shared: Record<string, unknown> = {}
+    w.shared = shared
+    const clock = world(on, w, TWO_LOGINS)
+    const wipe = wipeable(on)
+    await start($, clock)
+    await clock.advance(36_000)
+    expect(slots(w)).toEqual([SLOT2])
+    await restartAs($, source, wipe)
+    await clock.settle()
+    const footer = await mountFooter($)
+    const drawn = (await footer.find(GLYPHS))?.text
+    await footer.unmount()
+    w.limits = [
+      { kind: 'five_hour', percentUsed: 15, resetsAt: '2026-10-12T12:00:00Z' },
+      { kind: 'seven_day', percentUsed: 31, resetsAt: '2026-10-18T03:00:00Z' },
+    ]
+    await request($, clock)
+    await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+    await clock.settle()
+    const fives = { one: (shared['reading:1'] as { fiveHour?: { pct: number } } | undefined)?.fiveHour?.pct, two: (shared['reading:2'] as { fiveHour?: { pct: number } } | undefined)?.fiveHour?.pct }
+    await clock.advance(70_000)
+    const later = await mountFooter($)
+    const drawnLater = (await later.find(GLYPHS))?.text
+    await later.unmount()
+    expect({ drawn, fives, drawnLater, slots: slots(w) }).toEqual({
+      drawn: ' ⣀│⣷│  90% \n ▅│▆│  70% ',
+      fives: { one: 92, two: 15 },
+      drawnLater: ' ⣀│⣷│  85% \n ▅│▆│  69% ',
+      slots: [SLOT2],
+    })
+  })
+}
+
+test('a window Claude Code stopped from switching stays stopped through a /clear while Claude Code still refuses, told once; once the new session may switch, the rotation moves it again', async ($, on) => {
+  const w = fresh()
+  w.refuseEnv = true
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  const wipe = wipeable(on)
+  await start($, clock)
+  const notice = (t: string) => /^Can't switch accounts in this session/.test(t)
+  expect(w.toasts.filter(notice)).toHaveLength(1)
+  w.sessionId = 'session-2'
+  await restartAs($, 'clear', wipe)
+  await clock.advance(60_000)
+  const blocked = await mountFooter($)
+  expect(await blocked.find({ key: 'switch-blocked' })).toBeDefined()
+  await blocked.unmount()
+  expect(w.toasts.filter(notice)).toHaveLength(1)
+  // The way back it names is the new conversation's.
+  const pane = await mountPane($)
+  expect(await pane.find({ type: 'Text', text: /claude --resume session-2\./ })).toBeDefined()
+  await pane.unmount()
+  w.refuseEnv = false
+  await restartAs($, 'clear', wipe)
+  await clock.advance(60_000)
+  const free = await mountFooter($)
+  expect(await free.find({ key: 'switch-blocked' })).toBeUndefined()
+  await free.unmount()
+  w.usage['tok-1'] = [95, 41]
+  await clock.advance(10 * 60_000)
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+/** A switch that doesn't take, Claude Code still sending login 1's sign-in, and pointing back fails. */
+async function stuckOnOne(on: On, $: Engine, w: World): Promise<MockClock> {
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  w.isCacheStuck = true
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  return clock
+}
+
+for (const how of ['fails', 'is refused'] as const) {
+  test(`a switch that does not take, where pointing the session back ${how} too, says it could not point it back, and shows in use the account responses still come from`, async ($, on) => {
+    const w = fresh()
+    const clock = await stuckOnOne(on, $, w)
+    if (how === 'fails') w.envFails = true
+    else w.refuseEnv = true
+    await clock.advance(5 * 60_000)
+    await request($, clock)
+    await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+    await clock.settle()
+    const pane = await mountPane($)
+    const one = (await pane.find({ key: 'account-1' }))?.text
+    await pane.unmount()
+    expect({
+      slots: slots(w),
+      saidBack: w.toasts.filter(t => /shows in use again/.test(t)).length,
+      saidNotBack: w.toasts.filter(t => /could not be pointed back/.test(t)).length,
+      saidBlocked: w.toasts.filter(t => /^Can't switch accounts in this session/.test(t)).length,
+      oneInUse: /● in use/.test(one ?? ''),
+    }).toEqual({ slots: [SLOT2], saidBack: 0, saidNotBack: 1, saidBlocked: how === 'fails' ? 0 : 1, oneInUse: true })
+  })
+}
+
+test('the check at a start that a session may switch does not undo a switch asked for meanwhile', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await mountPane($)
+  let isHolding = true
+  let reach = () => {}
+  let release = () => {}
+  const reached = new Promise<void>(resolve => (reach = resolve))
+  const released = new Promise<void>(resolve => (release = resolve))
+  w.envGate = value => {
+    if (!isHolding || value !== '') return undefined
+    isHolding = false
+    reach()
+    return released
+  }
+  const restart = $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await reached
+  const press = pane.press({ key: 'use-2' })
+  for (let turn = 0; turn < 2000; turn++) await Promise.resolve()
+  release()
+  await restart
+  await press
+  await clock.settle()
+  await clock.advance(36_000)
+  await pane.redraw()
+  const two = (await pane.find({ key: 'account-2' }))?.text
+  await pane.unmount()
+  expect({ slots: slots(w), twoInUse: /● in use/.test(two ?? '') }).toEqual({ slots: [SLOT2], twoInUse: true })
+})
+
+test('a start that runs while a switch is made shows the account the session ends on', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
+  w.shared = {}
+  const clock = world(on, w, TWO_LOGINS)
+  let isHolding = false
+  let reach = () => {}
+  let release = () => {}
+  const reached = new Promise<void>(resolve => (reach = resolve))
+  const released = new Promise<void>(resolve => (release = resolve))
+  w.storeGate = key => {
+    if (!isHolding || key !== 'footer') return undefined
+    isHolding = false
+    reach()
+    return released
+  }
+  await start($, clock)
+  const pane = await mountPane($)
+  isHolding = true
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await reached
+  await pane.press({ key: 'use-2' })
+  expect(slots(w)).toEqual([SLOT2])
+  release()
+  await clock.settle()
+  await clock.advance(36_000)
+  await pane.redraw()
+  const one = (await pane.find({ key: 'account-1' }))?.text
+  const two = (await pane.find({ key: 'account-2' }))?.text
+  await pane.unmount()
+  expect({ slots: slots(w), oneInUse: /● in use/.test(one ?? ''), twoInUse: /● in use/.test(two ?? '') }).toEqual({ slots: [SLOT2], oneInUse: false, twoInUse: true })
 })

@@ -88,18 +88,18 @@ export type View = {
   health: Record<string, Health>
   /** Who each login's sign-in belongs to: a /login in a session on a login signs in there, whoever it signs in. */
   holders: Record<string, Holder>
-  /** The login this session sends its requests with. */
+  /** The login this window sends its requests with. */
   activeId: string
-  /** This session only: the model its main loop asks for, as its last request named it. */
+  /** This window only: the model its main loop asks for, as its last request named it. */
   model?: string
   /**
-   * This session only: the mod has started in it before. A later start is a
+   * This window only: the mod has started in it before. A later start is a
    * reload of its code, which finds the session at work: only a window that
    * has just opened starts elsewhere.
    */
   hasStarted?: boolean
   /**
-   * This session only: the logins whose token had run out at their last
+   * This window only: the logins whose token had run out at their last
    * check. Only Claude Code renews a token, as a session sends a request, so
    * no session has used such a login lately, and its usage isn't read until one does.
    */
@@ -127,9 +127,9 @@ export type View = {
   rotateTo: RotateTo
   /** Where new sessions start, picked in the pane and kept across sessions. */
   startOn: StartOn
-  /** This session only: Claude Code's security default refuses switching, as on a Team or Enterprise account. */
+  /** This window only: Claude Code's security default refuses switching, as on a Team or Enterprise account. */
   isSwitchBlocked?: boolean
-  /** This session only: it was told that the login in use is spent and the session can't leave it. */
+  /** This window only: it was told that the login in use is spent and the session can't leave it. */
   isStuckTold?: boolean
   /**
    * The account the Chrome extension is signed in to, the only one it answers:
@@ -138,19 +138,19 @@ export type View = {
   chromeAccountId?: string
   /** The accounts a Chrome extension has answered as, kept across sessions: the Chrome box lists them. */
   chromeAccountIds?: string[]
-  /** This session only: the Chrome box also lists the accounts no Chrome extension has answered as yet. */
+  /** This window only: the Chrome box also lists the accounts no Chrome extension has answered as yet. */
   isChromeOthersShown?: boolean
-  /** This session only: whether it has Claude in Chrome, once a call to it told. */
+  /** This window only: whether it has Claude in Chrome, once a call to it told. */
   hasChrome?: boolean
-  /** This session only: Claude in Chrome's connection, once made. */
+  /** This window only: Claude in Chrome's connection, once made. */
   chrome?: ChromeLink
-  /** This session only: Connect is under way, to this account. */
+  /** This window only: Connect is under way, to this account. */
   chromeConnecting?: string
-  /** This session's id, which `claude --resume` takes. */
+  /** The id of the window's conversation, which `claude --resume` takes. */
   sessionId?: string
-  /** This session only: the footer draws imitated usage, to judge its look. */
+  /** This window only: the footer draws imitated usage, to judge its look. */
   demo?: boolean
-  /** This session's terminal draws block characters from its font, short of the line, as Terminal.app does. */
+  /** This window's terminal draws block characters from its font, short of the line, as Terminal.app does. */
   hasFontBlocks: boolean
 }
 

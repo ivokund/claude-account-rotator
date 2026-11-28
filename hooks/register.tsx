@@ -1546,8 +1546,11 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
       })
     : undefined
   const startOn = start !== undefined && start.id !== activeId ? start : undefined
+  // A reload leaves Claude in Chrome as it was: connected, or to connect at the first browser call that finds no browser.
+  // One in the middle of Connect's visit ended the visit, and its mark goes.
+  if (!isOpening && !isConnectingChrome && (await getView($)).chromeConnecting !== undefined) await setView($, v => ({ ...v, chromeConnecting: undefined }))
   // First, while the session can still move: the rotation waits for it. Connect's visit ends where the session starts.
-  if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {
+  if (isInteractive && isOpening && shouldConnectAtOpen(await getView($), await $.clock.now())) {
     void connectChrome($, true, undefined, startOn).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
   } else if (startOn !== undefined) {
     // A move that fails leaves the session on Claude Code's login, and the checks below their turn.

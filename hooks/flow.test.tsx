@@ -3143,6 +3143,48 @@ test('a window Claude Code stopped from switching stays stopped through a /clear
   expect(slots(w)).toEqual([SLOT2])
 })
 
+test('a reload of the mod leaves Claude in Chrome connected as it was: no second visit, no reconnect', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [40, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'] })
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2, ''])
+  expect(w.chromeAsked).toEqual([SLOT2])
+  await start($, clock)
+  await clock.advance(36_000)
+  expect({ slots: slots(w), commands: w.commands, asked: w.chromeAsked }).toEqual({ slots: [SLOT2, ''], commands: [], asked: [SLOT2] })
+})
+
+test('a reload in the middle of Connect\'s visit, which ends the visit, leaves no Connecting mark', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [40, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  // The code before the reload had set the mark; its visit went with it.
+  let isLeft = false
+  on('state.get', { plugin: 'account-rotator' }, (_$, e, next) => {
+    if (!isLeft || e.key !== 'view') return next(e)
+    return Promise.resolve(next(e)).then(stored => (stored.value === undefined ? stored : { value: { ...stored.value, value: { ...(stored.value.value as Record<string, unknown>), chromeConnecting: '2' } } }))
+  })
+  on('state.set', { plugin: 'account-rotator' }, (_$, e, next) => {
+    if (e.key === 'view') isLeft = false
+    return next(e)
+  })
+  await start($, clock)
+  isLeft = true
+  await start($, clock)
+  const band = await mountBand($)
+  expect(await band.find({ type: 'Text', text: /Connecting Chrome/ })).toBeUndefined()
+  await band.unmount()
+})
+
 /** A switch that doesn't take, Claude Code still sending login 1's sign-in, and pointing back fails. */
 async function stuckOnOne(on: On, $: Engine, w: World): Promise<MockClock> {
   w.keychain['Claude Code-credentials'] = blob('tok-1')
